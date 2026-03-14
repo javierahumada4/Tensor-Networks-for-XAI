@@ -72,29 +72,101 @@ class MPS(nn.Module):
         return nn.ParameterList(tensor_list)
     
     def psi(self, configurations: torch.Tensor) -> torch.Tensor:
+        """
+        Computes the MPS amplitude Psi(v) for a batch of configurations.
+        """
         batch_size, num_sites = configurations.shape
         assert num_sites == self.num_sites
 
         first_tensor = self.site_tensors[0]
         first_site_values = configurations[:, 0]
-
         left_env = first_tensor.index_select(dim=0, index=first_site_values)
 
         for site in range(1, num_sites-1):
             site_tensor = self.site_tensors[site]
             site_values = configurations[:, site]
-
             selected_slices = site_tensor.index_select(dim=1, index=site_values)
+            selected_matrices = selected_slices.permute(1, 0, 2).contiguous()
 
-            site_matrix_batch = selected_slices.permute(1, 0, 2).contiguous()
-
-            left_env = torch.bmm(left_env.unsqueeze(1), site_matrix_batch).squeeze(1)
+            left_env = torch.bmm(left_env.unsqueeze(1), selected_matrices).squeeze(1)
 
         last_tensor = self.site_tensors[-1]
         last_site_values = configurations[:, -1]
-        selected_columns = last_tensor.index_select(dim=1, index=last_site_values)
-        selected_columns = selected_columns.transpose(0,1).contiguous()
+        selected_slices = last_tensor.index_select(dim=1, index=last_site_values)
+        selected_columns = selected_slices.transpose(0,1).contiguous()
 
         psi_values = (left_env * selected_columns).sum(dim=1)
         return psi_values
+    
+    def amplitude_squared(self, configurations: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
+        """
+        Returns |Psi(v)|^2 for each configuration.
+        """
+        psi_values = self.psi(configurations)
+        if psi_values.is_complex():
+            abs_sq = psi_values.real.square() + psi_values.imag.square() 
+        else:
+            abs_sq = psi_values.square()
+        return abs_sq.clamp_min(eps)
+    
+    def norm(self) -> torch.Tensor:
+        """ 
+        Computes Z = <psi|psi>, the exact squared norm of the MPS.
+        """
 
+        first_tensor = self.site_tensors[0]
+
+        env = first_tensor.conj().transpose(0,1) @ first_tensor
+
+        for site in range(1, self.num_sites - 1):
+            site_tensor = self.site_tensors[site]
+            site_matrices = site_tensor.permute(1, 0, 2).contiguous()
+
+            env_times_site_matrices = torch.matmul(env, site_matrices)
+
+            site_matrices_dag = site_matrices.conj().transpose(1, 2)
+            env = torch.matmul(site_matrices_dag, env_times_site_matrices).sum(dim=0)
+
+        last_tensor = self.site_tensors[-1]
+
+        env_times_last_tensor = env @ last_tensor
+        
+        z_value = (last_tensor.conj() * env_times_last_tensor).sum()
+
+        return z_value.real.clamp_min(1e-30)
+    
+    def log_norm(self) -> torch.Tensor:
+        """
+        Returns log Z where Z = <psi|psi>.
+        """
+        return torch.log(self.norm())
+
+    def log_prob(self, configurations: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
+        """
+        Computes log P(v) = log |Psi(v)|^2 - log Z
+        """
+        abs_sq = self.amplitude_squared(configurations, eps=eps)
+        log_abs_sq = torch.log(abs_sq)
+        log_z = self.log_norm()
+        return log_abs_sq - log_z
+
+    def nll(self, configurations: torch.Tensor, reduction: str = "mean", eps: float = 1e-12) -> torch.Tensor:
+        """
+        Negative log-likelihood:
+            NLL(v) = -log P(v)
+
+        reduction:
+          - "none": returns shape (batch_size,)
+          - "mean": scalar
+          - "sum" : scalar
+        """
+        nll_values = -self.log_prob(configurations, eps=eps)
+
+        if reduction == "none":
+            return nll_values
+        if reduction == "mean":
+            return nll_values.mean()
+        if reduction == "sum":
+            return nll_values.sum()
+
+        raise ValueError(f"Unsupported reduction: {reduction}")

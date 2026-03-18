@@ -175,3 +175,68 @@ class MPS(nn.Module):
             return nll_values.sum()
 
         raise ValueError(f"Unsupported reduction: {reduction}")
+    
+    @torch.no_grad()
+    def left_canonicalize(self, up_to: Optional[int] = None) -> None:
+        """
+        """
+        if up_to is None:
+            up_to = self.num_sites - 1
+        
+        first_tensor = self.site_tensors[0].data
+        Q, R = self.linalg.qr(first_tensor)
+
+        self.site_tensors[0].data = Q
+        next_tensor = self.site_tensors[1].data
+        self.site_tensors[1].data = torch.tensordot(R, next_tensor, dims=([1], [0]))
+        
+        for site in range(1, up_to):
+            site_tensor = self.site_tensors[site].data
+            D_l, d, D_r = site_tensor.shape
+
+            Q, R = torch.linalg.qr(site_tensor.flatten(0, 1))
+            self.site_tensors[site].data = Q.reshape(D_l, d, -1)
+            next_tensor = self.site_tensors[site + 1].data
+            self.site_tensors[site + 1].data = torch.tensordot(R, next_tensor, dims=([1], [0]))
+
+    @torch.no_grad()
+    def right_canonicalize(self, from_site: Optional[int] = None) -> None:
+        if from_site is None:
+            from_site = 1
+
+        last_tensor = self.site_tensors[-1].data
+        Q, R = torch.linalg.qr(last_tensor.T.conj())
+
+        self.site_tensors[-1].data = Q.T.conj()
+        previous_tensor = self.site_tensors[-2].data
+        self.site_tensors[-2].data = torch.tensordot(previous_tensor, R.T.conj(), dims=([-1], [0]))
+
+        for site in range(self.num_sites - 2, from_site, -1):
+            site_tensor = self.site_tensors[site].data
+            D_l, d, D_r = site_tensor.shape
+
+            Q, R = torch.linalg.qr(site_tensor.flatten(1, 2).T.conj())
+            self.site_tensors[site].data = Q.T.conj().reshape(-1, d, D_r)
+            previous_tensor = self.site_tensors[site - 1].data
+            self.site_tensors[site - 1].data = torch.tensordot(previous_tensor, R.T.conj(), dims=([-1], [0]))
+
+    @torch.no_grad()
+    def mixed_canonicalize(self, center: int) -> None:
+        assert 0 <= center < self.num_sites
+        self.left_canonicalize(up_to=center)
+        self.right_canonicalize(from_site=center + 1)
+        self._center = center
+
+    def log_norm_from_center(self) -> torch.Tensor:
+        """
+        Si el MPS está en forma mixta con centro en self._center,
+        log Z = log ‖Γ_center‖²_F.
+        Mucho más rápido y estable que el sweep completo.
+        """
+        assert hasattr(self, "_center"), (
+            "Llama a mixed_canonicalize(k) antes de usar log_norm_from_center()"
+        )
+
+        Gamma = self.site_tensors[self._center]
+        sq_norm = (Gamma.conj() * Gamma).real.sum()
+        return torch.log(sq_norm.clamp_min(1e-30))

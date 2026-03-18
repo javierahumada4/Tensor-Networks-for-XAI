@@ -183,42 +183,53 @@ class MPS(nn.Module):
         if up_to is None:
             up_to = self.num_sites - 1
         
-        first_tensor = self.site_tensors[0].data
-        Q, R = self.linalg.qr(first_tensor)
-
-        self.site_tensors[0].data = Q
-        next_tensor = self.site_tensors[1].data
-        self.site_tensors[1].data = torch.tensordot(R, next_tensor, dims=([1], [0]))
-        
-        for site in range(1, up_to):
+        for site in range(up_to):
             site_tensor = self.site_tensors[site].data
-            D_l, d, D_r = site_tensor.shape
 
-            Q, R = torch.linalg.qr(site_tensor.flatten(0, 1))
-            self.site_tensors[site].data = Q.reshape(D_l, d, -1)
+            if site == 0:
+                Q, R = torch.linalg.qr(site_tensor)
+
+                self.site_tensors[site].data = Q
+            else:
+                D_l, d, D_r = site_tensor.shape
+                Q, R = torch.linalg.qr(site_tensor.flatten(0, 1))
+                
+                self.site_tensors[site].data = Q.reshape(D_l, d, -1)
+            
             next_tensor = self.site_tensors[site + 1].data
-            self.site_tensors[site + 1].data = torch.tensordot(R, next_tensor, dims=([1], [0]))
+            if site + 1 == self.num_sites - 1:
+                self.site_tensors[site + 1].data = R @ next_tensor
+            else:
+                D_l, d, D_r = next_tensor.shape
+                self.site_tensors[site + 1].data = (
+                    R @ next_tensor.reshape(D_l, d * D_r)
+                ).reshape(-1, d, D_r)
 
     @torch.no_grad()
     def right_canonicalize(self, from_site: Optional[int] = None) -> None:
         if from_site is None:
             from_site = 1
 
-        last_tensor = self.site_tensors[-1].data
-        Q, R = torch.linalg.qr(last_tensor.T.conj())
-
-        self.site_tensors[-1].data = Q.T.conj()
-        previous_tensor = self.site_tensors[-2].data
-        self.site_tensors[-2].data = torch.tensordot(previous_tensor, R.T.conj(), dims=([-1], [0]))
-
-        for site in range(self.num_sites - 2, from_site, -1):
+        for site in range(self.num_sites - 1, from_site - 1, -1):
             site_tensor = self.site_tensors[site].data
-            D_l, d, D_r = site_tensor.shape
 
-            Q, R = torch.linalg.qr(site_tensor.flatten(1, 2).T.conj())
-            self.site_tensors[site].data = Q.T.conj().reshape(-1, d, D_r)
+            if site == self.num_sites - 1:
+                Q, R = torch.linalg.qr(site_tensor.conj().T)
+                self.site_tensors[site].data = Q.conj().T
+            else:
+                D_l, d, D_r = site_tensor.shape
+                Q, R = torch.linalg.qr(site_tensor.reshape(D_l, d * D_r).conj().T)
+                self.site_tensors[site].data = Q.conj().T.reshape(-1, d, D_r)
+
             previous_tensor = self.site_tensors[site - 1].data
-            self.site_tensors[site - 1].data = torch.tensordot(previous_tensor, R.T.conj(), dims=([-1], [0]))
+            Rdag = R.conj().T
+            if site - 1 == 0:
+                self.site_tensors[site - 1].data = previous_tensor @ Rdag
+            else:
+                D_l, d, D_r = previous_tensor.shape
+                self.site_tensors[site - 1].data = (
+                    previous_tensor.reshape(D_l * d, D_r) @ Rdag
+                ).reshape(D_l, d, -1)
 
     @torch.no_grad()
     def mixed_canonicalize(self, center: int) -> None:
@@ -229,12 +240,9 @@ class MPS(nn.Module):
 
     def log_norm_from_center(self) -> torch.Tensor:
         """
-        Si el MPS está en forma mixta con centro en self._center,
-        log Z = log ‖Γ_center‖²_F.
-        Mucho más rápido y estable que el sweep completo.
         """
         assert hasattr(self, "_center"), (
-            "Llama a mixed_canonicalize(k) antes de usar log_norm_from_center()"
+            "Call mixed_canonicalize(k) before using log_norm_from_center()"
         )
 
         Gamma = self.site_tensors[self._center]

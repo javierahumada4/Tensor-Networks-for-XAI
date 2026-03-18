@@ -37,7 +37,7 @@ class MPS(nn.Module):
         self.dtype = dtype
         self.device = device
 
-        self.site_tensors = self.normal_init(init_std)
+        self.site_tensors = self._normal_init(init_std)
 
     def _randn(self, *shape):
         """
@@ -53,7 +53,7 @@ class MPS(nn.Module):
         else:
             return torch.randn(*shape, dtype=self.dtype, device=self.device)
 
-    def normal_init(self, init_std: Optional[float] = None) -> nn.ParameterList:
+    def _normal_init(self, init_std: Optional[float] = None) -> nn.ParameterList:
         if init_std is None:
             init_std = 1.0 / math.sqrt(self.bond_dim)
 
@@ -86,14 +86,14 @@ class MPS(nn.Module):
             site_tensor = self.site_tensors[site]
             site_values = configurations[:, site]
             selected_slices = site_tensor.index_select(dim=1, index=site_values)
-            selected_matrices = selected_slices.permute(1, 0, 2).contiguous()
+            selected_matrices = selected_slices.permute(1, 0, 2)
 
             left_env = torch.bmm(left_env.unsqueeze(1), selected_matrices).squeeze(1)
 
         last_tensor = self.site_tensors[-1]
         last_site_values = configurations[:, -1]
         selected_slices = last_tensor.index_select(dim=1, index=last_site_values)
-        selected_columns = selected_slices.transpose(0,1).contiguous()
+        selected_columns = selected_slices.transpose(0,1)
 
         psi_values = (left_env * selected_columns).sum(dim=1)
         return psi_values
@@ -109,23 +109,28 @@ class MPS(nn.Module):
             abs_sq = psi_values.square()
         return abs_sq.clamp_min(eps)
     
-    def norm(self) -> torch.Tensor:
+    def log_norm(self) -> torch.Tensor:
         """ 
-        Computes Z = <psi|psi>, the exact squared norm of the MPS.
+        Computes log Z = log <psi|psi>.
         """
 
         first_tensor = self.site_tensors[0]
 
         env = first_tensor.conj().transpose(0,1) @ first_tensor
 
+        log_scale = torch.zeros((), dtype=self.dtype, device=first_tensor.device)
+
         for site in range(1, self.num_sites - 1):
             site_tensor = self.site_tensors[site]
-            site_matrices = site_tensor.permute(1, 0, 2).contiguous()
+            site_matrices = site_tensor.permute(1, 0, 2)
 
             env_times_site_matrices = torch.matmul(env, site_matrices)
-
             site_matrices_dag = site_matrices.conj().transpose(1, 2)
             env = torch.matmul(site_matrices_dag, env_times_site_matrices).sum(dim=0)
+
+            scale = env.abs().max().clamp_min(1e-30)
+            env   = env / scale
+            log_scale = log_scale + torch.log(scale)
 
         last_tensor = self.site_tensors[-1]
 
@@ -133,13 +138,13 @@ class MPS(nn.Module):
         
         z_value = (last_tensor.conj() * env_times_last_tensor).sum()
 
-        return z_value.real.clamp_min(1e-30)
+        return torch.log(z_value.real.clamp_min(1e-30)) + log_scale
     
-    def log_norm(self) -> torch.Tensor:
+    def norm(self) -> torch.Tensor:
         """
-        Returns log Z where Z = <psi|psi>.
+        Returns Z = <psi|psi>.
         """
-        return torch.log(self.norm())
+        return self.log_norm().exp()
 
     def log_prob(self, configurations: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
         """

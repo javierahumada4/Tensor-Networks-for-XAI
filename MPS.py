@@ -39,6 +39,8 @@ class MPS(nn.Module):
 
         self.site_tensors = self._normal_init(init_std)
 
+        self._is_canonical = False
+
     def _randn(self, *shape):
         """
         Generates real or complex Gaussian tensors depending on dtype.
@@ -98,7 +100,7 @@ class MPS(nn.Module):
         psi_values = (left_env * selected_columns).sum(dim=1)
         return psi_values
     
-    def amplitude_squared(self, configurations: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
+    def amplitude_squared(self, configurations: torch.Tensor, eps: float = 1e-30) -> torch.Tensor:
         """
         Returns |Psi(v)|^2 for each configuration.
         """
@@ -118,7 +120,7 @@ class MPS(nn.Module):
 
         env = first_tensor.conj().transpose(0,1) @ first_tensor
 
-        log_scale = 0.0
+        log_scale = torch.zeros((), dtype=torch.float64, device=env.device)
 
         for site in range(1, self.num_sites - 1):
             site_tensor = self.site_tensors[site]
@@ -130,7 +132,7 @@ class MPS(nn.Module):
 
             scale = env.abs().max().clamp_min(1e-30)
             env   = env / scale
-            log_scale += scale.log().item()
+            log_scale = log_scale + scale.double().log()
 
         last_tensor = self.site_tensors[-1]
 
@@ -138,7 +140,12 @@ class MPS(nn.Module):
         
         z_value = (last_tensor.conj() * env_times_last_tensor).sum()
 
-        return torch.log(z_value.real.clamp_min(1e-30)) + log_scale
+        real_dtype = (
+            torch.float32 if self.dtype in (torch.float32, torch.complex64)
+            else torch.float64
+        )
+
+        return (torch.log(z_value.real.clamp_min(1e-30).double()) + log_scale).to(real_dtype)
     
     def norm(self) -> torch.Tensor:
         """
@@ -146,7 +153,7 @@ class MPS(nn.Module):
         """
         return self.log_norm().exp()
 
-    def log_prob(self, configurations: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
+    def log_prob(self, configurations: torch.Tensor, eps: float = 1e-30) -> torch.Tensor:
         """
         Computes log P(v) = log |Psi(v)|^2 - log Z
         """
@@ -155,7 +162,7 @@ class MPS(nn.Module):
         log_z = self.log_norm()
         return log_abs_sq - log_z
 
-    def nll(self, configurations: torch.Tensor, reduction: str = "mean", eps: float = 1e-12) -> torch.Tensor:
+    def nll(self, configurations: torch.Tensor, reduction: str = "mean", eps: float = 1e-30) -> torch.Tensor:
         """
         Negative log-likelihood:
             NLL(v) = -log P(v)
@@ -237,11 +244,12 @@ class MPS(nn.Module):
         self.left_canonicalize(up_to=center)
         self.right_canonicalize(from_site=center + 1)
         self._center = center
+        self._is_canonical = True
 
     def log_norm_from_center(self) -> torch.Tensor:
         """
         """
-        assert hasattr(self, "_center"), (
+        assert self._is_canonical and hasattr(self, "_center"), (
             "Call mixed_canonicalize(k) before using log_norm_from_center()"
         )
 

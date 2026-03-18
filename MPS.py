@@ -118,7 +118,7 @@ class MPS(nn.Module):
 
         env = first_tensor.conj().transpose(0,1) @ first_tensor
 
-        log_scale = torch.zeros((), dtype=self.dtype, device=first_tensor.device)
+        log_scale = 0.0
 
         for site in range(1, self.num_sites - 1):
             site_tensor = self.site_tensors[site]
@@ -130,7 +130,7 @@ class MPS(nn.Module):
 
             scale = env.abs().max().clamp_min(1e-30)
             env   = env / scale
-            log_scale = log_scale + torch.log(scale)
+            log_scale += scale.log().item()
 
         last_tensor = self.site_tensors[-1]
 

@@ -317,3 +317,42 @@ class MPS(nn.Module):
         Gamma = self.site_tensors[self._center]
         sq_norm = (Gamma.conj() * Gamma).real.sum()
         return torch.log(sq_norm.clamp_min(1e-30))
+    
+    def merge_sites(self, k: int) -> torch.Tensor:
+        """
+        """
+        assert 0 <= k < self.num_sites - 1
+
+        A_k  = self.site_tensors[k].data
+        A_k1 = self.site_tensors[k + 1].data
+
+        D_l, d1, D_mid = A_k.shape
+        _, d2, D_r   = A_k1.shape
+
+        return (A_k.reshape(D_l * d1, D_mid) @ A_k1.reshape(D_mid, d2 * D_r)).reshape(D_l, d1, d2, D_r)
+    
+    @torch.no_grad()
+    def split_and_truncate(
+        self,
+        k: int,
+        theta: torch.Tensor,
+        direction: str,
+        max_bond_dim: int,
+        cutoff: float = 0.0,
+    ) -> torch.Tensor:
+        """
+        """
+        D_l, d1, d2, D_r = theta.shape
+        U, S, Vh = torch.linalg.svd(theta.reshape(D_l * d1, d2 * D_r), full_matrices=False)
+
+        n = self._truncation_rank(S, max_bond_dim, cutoff)
+        U, S, Vh = U[:, :n], S[:n], Vh[:n, :]
+
+        if direction == "right":
+            self.site_tensors[k].data = U.reshape(D_l, d1, n)
+            self.site_tensors[k + 1].data = (S.unsqueeze(1) * Vh).reshape(n, d2, D_r)
+        else:
+            self.site_tensors[k].data = (U * S.unsqueeze(0)).reshape(D_l, d1, n)
+            self.site_tensors[k + 1].data = Vh.reshape(n, d2, D_r)
+
+        return S.detach().clone()

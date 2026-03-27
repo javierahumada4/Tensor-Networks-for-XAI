@@ -356,3 +356,22 @@ class MPS(nn.Module):
             self.site_tensors[k + 1].data = Vh.reshape(n, d2, D_r)
 
         return S.detach().clone()
+    
+    @torch.no_grad()
+    def entanglement_entropy(
+        self,
+        max_bond_dim: Optional[int] = None,
+        cutoff: float = 0.0,
+    ) -> List[float]:
+        """
+        Von Neumann entanglement entropy S(k) = −Σ_i p_i ln p_i at each bond,
+        where p_i = σ_i² / Σ σ_j².
+        """
+        svs = self.left_canonicalize_svd(max_bond_dim=max_bond_dim, cutoff=cutoff)
+        entropies: List[float] = []
+        for S in svs:
+            p = S.square()
+            p = p / p.sum().clamp_min(1e-30)
+            ent = -(p * p.clamp_min(1e-30).log()).sum()
+            entropies.append(ent.item())
+        return entropies

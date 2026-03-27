@@ -218,6 +218,95 @@ class MPS(nn.Module):
         self._center = center
         self._is_canonical = True
 
+    def _truncation_rank(
+        self,
+        S: torch.Tensor,
+        max_bond_dim: Optional[int],
+        cutoff: float,
+    ) -> int:
+        """
+        Determine how many singular values to keep.
+        """
+        n = len(S)
+        if cutoff > 0:
+            S_max = S[0].abs().clamp_min(1e-30)
+            n = max(int((S / S_max >= cutoff).sum().item()), 1)
+        if max_bond_dim is not None:
+            n = min(n, max_bond_dim)
+        return n
+
+    @torch.no_grad()
+    def left_canonicalize_svd(
+        self,
+        up_to: Optional[int] = None,
+        max_bond_dim: Optional[int] = None,
+        cutoff: float = 0.0
+    ) -> List[torch.Tensor]:
+        """
+        """
+        if up_to is None:
+            up_to = self.num_sites - 1
+        
+        singular_values = []
+
+        for site in range(up_to):
+            tensor = self.site_tensors[site].data
+            D_l, d, D_r = tensor.shape
+
+            U, S, Vh = torch.linalg.svd(tensor.reshape(D_l * d, D_r), full_matrices=False)
+            n = self._truncation_rank(S, max_bond_dim, cutoff)
+            U, S, Vh = U[:, :n], S[:n], Vh[:n, :]
+
+            singular_values.append(S.detach().clone())
+
+            self.site_tensors[site].data = U.reshape(D_l, d, n)
+
+            SV = S.unsqueeze(1) * Vh
+            next_tensor = self.site_tensors[site + 1].data
+            _, d_n, D_r2 = next_tensor.shape
+
+            self.site_tensors[site + 1].data = (
+                SV @ next_tensor.reshape(D_r, d_n * D_r2)
+            ).reshape(n, d_n, D_r2)
+        
+        return singular_values
+    
+    @torch.no_grad()
+    def right_canonicalize_svd(
+        self,
+        from_site: Optional[int] = None,
+        max_bond_dim: Optional[int] = None,
+        cutoff: float = 0.0,
+    ) -> List[torch.Tensor]:
+        """
+        """
+        if from_site is None:
+            from_site = 1
+
+        singular_values: List[torch.Tensor] = []
+
+        for site in range(self.num_sites - 1, from_site - 1, -1):
+            tensor = self.site_tensors[site].data
+            D_l, d, D_r = tensor.shape
+
+            U, S, Vh = torch.linalg.svd(tensor.reshape(D_l, d * D_r), full_matrices=False)
+            n = self._truncation_rank(S, max_bond_dim, cutoff)
+            U, S, Vh = U[:, :n], S[:n], Vh[:n, :]
+
+            singular_values.append(S.detach().clone())
+
+            self.site_tensors[site].data = Vh.reshape(n, d, D_r)
+
+            US = U * S.unsqueeze(0)
+            previous_tensor = self.site_tensors[site - 1].data
+            D_l2, d_p, _ = previous_tensor.shape
+            self.site_tensors[site - 1].data = (
+                previous_tensor.reshape(D_l2 * d_p, D_l) @ US
+            ).reshape(D_l2, d_p, n)
+
+        singular_values.reverse()
+        return singular_values
+
     def log_norm_from_center(self) -> torch.Tensor:
         """
         """

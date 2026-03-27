@@ -61,14 +61,14 @@ class MPS(nn.Module):
 
         tensor_list: List[nn.Parameter] = []
 
-        left_tensor = self._randn(self.physical_dim, self.bond_dim) * init_std
+        left_tensor = self._randn(1, self.physical_dim, self.bond_dim) * init_std
         tensor_list.append(nn.Parameter(left_tensor))
 
         for _ in range(1, self.num_sites-1):
             bulk_tensor = self._randn(self.bond_dim, self.physical_dim, self.bond_dim) * init_std
             tensor_list.append(nn.Parameter(bulk_tensor))
 
-        right_tensor = self._randn(self.bond_dim, self.physical_dim) * init_std
+        right_tensor = self._randn(self.bond_dim, self.physical_dim, 1) * init_std
         tensor_list.append(nn.Parameter(right_tensor))
 
         return nn.ParameterList(tensor_list)
@@ -80,25 +80,18 @@ class MPS(nn.Module):
         batch_size, num_sites = configurations.shape
         assert num_sites == self.num_sites
 
-        first_tensor = self.site_tensors[0]
-        first_site_values = configurations[:, 0]
-        left_env = first_tensor.index_select(dim=0, index=first_site_values)
+        tensor = self.site_tensors[0]
+        values = configurations[:, 0]
+        env = tensor[:, values, :].permute(1, 0, 2)
 
-        for site in range(1, num_sites-1):
-            site_tensor = self.site_tensors[site]
-            site_values = configurations[:, site]
-            selected_slices = site_tensor.index_select(dim=1, index=site_values)
-            selected_matrices = selected_slices.permute(1, 0, 2)
+        for site in range(1, num_sites):
+            tensor = self.site_tensors[site]
+            values = configurations[:, site]
+            selected_matrices = tensor[:, values, :].permute(1, 0, 2)
 
-            left_env = torch.bmm(left_env.unsqueeze(1), selected_matrices).squeeze(1)
+            env = torch.bmm(env, selected_matrices)
 
-        last_tensor = self.site_tensors[-1]
-        last_site_values = configurations[:, -1]
-        selected_slices = last_tensor.index_select(dim=1, index=last_site_values)
-        selected_columns = selected_slices.transpose(0,1)
-
-        psi_values = (left_env * selected_columns).sum(dim=1)
-        return psi_values
+        return env.reshape(batch_size)
     
     def amplitude_squared(self, configurations: torch.Tensor, eps: float = 1e-30) -> torch.Tensor:
         """
@@ -116,36 +109,27 @@ class MPS(nn.Module):
         Computes log Z = log <psi|psi>.
         """
 
-        first_tensor = self.site_tensors[0]
-
-        env = first_tensor.conj().transpose(0,1) @ first_tensor
-
+        env = torch.ones(1, 1, dtype=self.dtype, device=self.site_tensors[0].device)
         log_scale = torch.zeros((), dtype=torch.float64, device=env.device)
 
-        for site in range(1, self.num_sites - 1):
-            site_tensor = self.site_tensors[site]
-            site_matrices = site_tensor.permute(1, 0, 2)
+        for site in range(self.num_sites):
+            tensor = self.site_tensors[site]
+            matrices = tensor.permute(1, 0, 2)
 
-            env_times_site_matrices = torch.matmul(env, site_matrices)
-            site_matrices_dag = site_matrices.conj().transpose(1, 2)
-            env = torch.matmul(site_matrices_dag, env_times_site_matrices).sum(dim=0)
+            contracted = torch.matmul(env, matrices)
+            matrices_dagger = matrices.conj().transpose(1, 2)
+            env = torch.matmul(matrices_dagger, contracted).sum(dim=0)
 
             scale = env.abs().max().clamp_min(1e-30)
             env   = env / scale
             log_scale = log_scale + scale.double().log()
-
-        last_tensor = self.site_tensors[-1]
-
-        env_times_last_tensor = env @ last_tensor
         
-        z_value = (last_tensor.conj() * env_times_last_tensor).sum()
-
+        z_value = env.squeeze()
         real_dtype = (
             torch.float32 if self.dtype in (torch.float32, torch.complex64)
             else torch.float64
         )
-
-        return (torch.log(z_value.real.clamp_min(1e-30).double()) + log_scale).to(real_dtype)
+        return (z_value.real.clamp_min(1e-30).double().log() + log_scale).to(real_dtype)
     
     def norm(self) -> torch.Tensor:
         """
@@ -191,26 +175,19 @@ class MPS(nn.Module):
             up_to = self.num_sites - 1
         
         for site in range(up_to):
-            site_tensor = self.site_tensors[site].data
+            tensor = self.site_tensors[site].data
+            D_l, d, D_r = tensor.shape
 
-            if site == 0:
-                Q, R = torch.linalg.qr(site_tensor)
-
-                self.site_tensors[site].data = Q
-            else:
-                D_l, d, D_r = site_tensor.shape
-                Q, R = torch.linalg.qr(site_tensor.flatten(0, 1))
-                
-                self.site_tensors[site].data = Q.reshape(D_l, d, -1)
+            Q, R = torch.linalg.qr(tensor.reshape(D_l * d, D_r))
+            new_D = Q.shape[-1]
+            self.site_tensors[site].data = Q.reshape(D_l, d, new_D)
             
             next_tensor = self.site_tensors[site + 1].data
-            if site + 1 == self.num_sites - 1:
-                self.site_tensors[site + 1].data = R @ next_tensor
-            else:
-                D_l, d, D_r = next_tensor.shape
-                self.site_tensors[site + 1].data = (
-                    R @ next_tensor.reshape(D_l, d * D_r)
-                ).reshape(-1, d, D_r)
+            _, d_n, D_r2 = next_tensor.shape
+
+            self.site_tensors[site + 1].data = (
+                R @ next_tensor.reshape(D_r, d_n * D_r2)
+            ).reshape(new_D, d_n, D_r2)
 
     @torch.no_grad()
     def right_canonicalize(self, from_site: Optional[int] = None) -> None:
@@ -218,25 +195,20 @@ class MPS(nn.Module):
             from_site = 1
 
         for site in range(self.num_sites - 1, from_site - 1, -1):
-            site_tensor = self.site_tensors[site].data
+            tensor = self.site_tensors[site].data
+            D_l, d, D_r = tensor.shape
 
-            if site == self.num_sites - 1:
-                Q, R = torch.linalg.qr(site_tensor.conj().T)
-                self.site_tensors[site].data = Q.conj().T
-            else:
-                D_l, d, D_r = site_tensor.shape
-                Q, R = torch.linalg.qr(site_tensor.reshape(D_l, d * D_r).conj().T)
-                self.site_tensors[site].data = Q.conj().T.reshape(-1, d, D_r)
+            Q, R = torch.linalg.qr(tensor.reshape(D_l, d * D_r).conj().T)
+            new_D = Q.shape[1]
+            self.site_tensors[site].data = Q.conj().T.reshape(new_D, d, D_r)
 
             previous_tensor = self.site_tensors[site - 1].data
             Rdag = R.conj().T
-            if site - 1 == 0:
-                self.site_tensors[site - 1].data = previous_tensor @ Rdag
-            else:
-                D_l, d, D_r = previous_tensor.shape
-                self.site_tensors[site - 1].data = (
-                    previous_tensor.reshape(D_l * d, D_r) @ Rdag
-                ).reshape(D_l, d, -1)
+            D_l2, d_p, _ = previous_tensor.shape
+
+            self.site_tensors[site - 1].data = (
+                previous_tensor.reshape(D_l2 * d_p, D_l) @ Rdag
+            ).reshape(D_l2, d_p, new_D)
 
     @torch.no_grad()
     def mixed_canonicalize(self, center: int) -> None:

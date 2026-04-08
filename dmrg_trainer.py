@@ -1,4 +1,4 @@
-from typing import Optional, List
+from typing import Optional, List, Dict
 from dataclasses import dataclass
 
 import torch
@@ -11,6 +11,9 @@ class DMRGConfig:
     safe_threshold: float = 1e6
     max_bond_dim: int = 100
     svd_cutoff: float = 1e-8
+    lr: float = 0.01
+    num_loops: int = 20
+    batch_size: int = 256   
 
 class DMRGTrainer:
     def __init__(self, mps: nn.Module, config: Optional[DMRGConfig] = None):
@@ -46,14 +49,14 @@ class DMRGTrainer:
         assert num_sites == self.mps.num_sites
 
         environments = [None] * num_sites
-        environments[num_sites-1] = torch.ones(batch_size, 1, dtype=self.mps.dtype, device=configurations.device)
+        environments[num_sites - 1] = torch.ones(batch_size, 1, dtype=self.mps.dtype, device=configurations.device)
 
         for site in range(num_sites-1, 0, -1):
             tensor = self.mps.site_tensors[site].data
             values = configurations[:, site]
             selected_matrices = tensor[:, values, :].permute(1, 0, 2)
 
-            environments[site + 1] = torch.bmm(selected_matrices, environments[site].unsqueeze(2)).squeeze(2)
+            environments[site - 1] = torch.bmm(selected_matrices, environments[site].unsqueeze(2)).squeeze(2)
 
         return environments
 
@@ -111,7 +114,7 @@ class DMRGTrainer:
                 if theta.is_complex():
                     contribution = (left_env_masked.conj() * psi_inv.unsqueeze(1)).T @ right_env_masked
                 else:
-                    contribution = (right_env_masked * psi_inv.unsqueeze(1)).T @ right_env_masked
+                    contribution = (left_env_masked * psi_inv.unsqueeze(1)).T @ right_env_masked
 
                 term2[:, s, t, :] = contribution
 
@@ -156,3 +159,67 @@ class DMRGTrainer:
                 left_envs[k + 1] = self._update_left_env(left_envs[k], k, configurations)
             elif direction == "left" and k > 0:
                 right_envs[k] = self._update_right_env(right_envs[k + 1], k + 1, configurations)
+
+    @torch.no_grad()
+    def train(
+        self,
+        train_data: torch.Tensor,
+        val_data: Optional[torch.Tensor] = None,
+    ) -> List[Dict]:
+        cfg = self.config
+        num_sites = self.mps.num_sites
+        assert train_data.shape[1] == num_sites
+
+        device = next(self.mps.parameters()).device
+        train_data = train_data.to(device)
+        if val_data is not None:
+            val_data = val_data.to(device)
+
+        self.mps.left_canonicalize()
+
+        lr = cfg.lr
+
+        for _ in range(cfg.num_loops):
+            idx = torch.randint(0, len(train_data), (cfg.batch_size,), device=device)
+            batch = train_data[idx]
+            left_env = self._build_left_envs(batch)
+            right_env = self._build_right_envs(batch)
+            self._sweep(batch, "left", lr, left_env, right_env)
+
+            idx = torch.randint(0, len(train_data), (cfg.batch_size,), device=device)
+            batch = train_data[idx]
+            left_env = self._build_left_envs(batch)
+            right_env = self._build_right_envs(batch)
+            self._sweep(batch, "right", lr, left_env, right_env)
+
+def dmrg_train(
+    mps: nn.Module,
+    train_data: torch.Tensor,
+    val_data: Optional[torch.Tensor] = None,
+    *,
+    max_bond_dim: int = 100,
+    svd_cutoff: float = 1e-8,
+    lr: float = 0.01,
+    num_loops: int = 20,
+    num_descent_steps: int = 1,
+    batch_size: int = 256,
+) -> List[Dict]:
+    """
+    Train an MPS Born Machine with DMRG two-site updates.
+
+    Example:
+        from mps import MPS
+        from dmrg_trainer import dmrg_train
+
+        model = MPS(num_sites=30, bond_dim=2, physical_dim=2)
+        history = dmrg_train(model, train_data, max_bond_dim=60, num_loops=40)
+    """
+    config = DMRGConfig(
+        num_descent_steps=num_descent_steps,
+        max_bond_dim=max_bond_dim,
+        svd_cutoff=svd_cutoff,
+        lr=lr,
+        num_loops=num_loops,
+        batch_size=batch_size,
+    )
+    return DMRGTrainer(mps, config).train(train_data, val_data)

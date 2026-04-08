@@ -7,6 +7,10 @@ import torch.nn as nn
 @dataclass
 class DMRGConfig:
     """Hyperparameters for DMRG training."""
+    num_descent_steps: int = 1
+    safe_threshold: float = 1e6
+    max_bond_dim: int = 100
+    svd_cutoff: float = 1e-8
 
 class DMRGTrainer:
     def __init__(self, mps: nn.Module, config: Optional[DMRGConfig] = None):
@@ -110,7 +114,45 @@ class DMRGTrainer:
                     contribution = (right_env_masked * psi_inv.unsqueeze(1)).T @ right_env_masked
 
                 term2[:, s, t, :] = contribution
-                
+
         term2 = (2.0 / bond_dim) * term2
 
         return term1 - term2
+    
+    @torch.no_grad()
+    def _sweep(
+        self,
+        configurations: torch.Tensor,
+        direction: str,
+        lr: float,
+        left_envs: List[torch.Tensor],
+        right_envs: List[torch.Tensor],
+    ) -> None:
+        num_sites = self.mps.num_sites
+        cfg = self.config
+
+        bonds = (
+            range(num_sites - 2, -1, -1) if direction == "left"
+            else range(0, num_sites - 1)
+        )
+
+        for k in bonds:
+            theta = self.mps.merge_sites(k)
+            left_env = left_envs[k]
+            right_env = right_envs[k + 1]
+
+            for _ in range(cfg.num_descent_steps):
+                grad = self._compute_gradient(k, theta, left_env, right_env, configurations)
+                grad_norm = grad.norm().item()
+                if grad_norm > cfg.safe_threshold:
+                    grad = grad * (cfg.safe_threshold / grad_norm)
+                theta = theta - lr * grad
+
+            self.mps.split_and_truncate(
+                k, theta, direction, cfg.max_bond_dim, cfg.svd_cutoff
+            )
+
+            if direction == "right" and k + 1 < num_sites - 1:
+                left_envs[k + 1] = self._update_left_env(left_envs[k], k, configurations)
+            elif direction == "left" and k > 0:
+                right_envs[k] = self._update_right_env(right_envs[k + 1], k + 1, configurations)

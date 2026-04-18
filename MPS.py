@@ -218,7 +218,6 @@ class MPS(nn.Module):
         self._center = center
         self._is_canonical = True
 
-    @staticmethod
     def _truncation_rank(
         self,
         S: torch.Tensor,

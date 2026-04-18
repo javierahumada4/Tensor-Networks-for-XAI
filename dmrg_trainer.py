@@ -92,7 +92,7 @@ class DMRGTrainer:
         """
 
         physical_dim = self.mps.physical_dim
-        bond_dim = configurations.shape[0]
+        batch_size = configurations.shape[0]
 
         Z = (theta.conj() * theta).real.sum()
         term1 = 2.0 * theta / Z.clamp_min(1e-30)
@@ -103,7 +103,7 @@ class DMRGTrainer:
         theta_selected = theta[:, v_k, v_k1, :].permute(1, 0, 2)
 
         psi_v = torch.bmm(left_env.unsqueeze(1),
-                          torch.bmm(theta_selected, right_env.unsqueeze(2))).reshape(bond_dim)
+                          torch.bmm(theta_selected, right_env.unsqueeze(2))).reshape(batch_size)
         
         psi_safe = psi_v.clone()
         psi_safe[psi_safe.abs() < 1e-30] = 1e-30
@@ -125,7 +125,7 @@ class DMRGTrainer:
 
                 term2[:, s, t, :] = contribution
 
-        term2 = (2.0 / bond_dim) * term2
+        term2 = (2.0 / batch_size) * term2
 
         return term1 - term2
     
@@ -203,8 +203,9 @@ class DMRGTrainer:
         lr = cfg.lr
         best_nll = float('inf')
         wait = 0
+        history: List[Dict] = []
 
-        for _ in range(cfg.num_loops):
+        for loop in range(cfg.num_loops):
             idx = torch.randint(0, len(train_data), (cfg.batch_size,), device=device)
             batch = train_data[idx]
             left_env = self._build_left_envs(batch)
@@ -218,6 +219,17 @@ class DMRGTrainer:
             self._sweep(batch, "right", lr, left_env, right_env)
 
             train_nll = self._evaluate_nll(train_data)
+
+            record: Dict = {
+                "loop": loop,
+                "train_nll": train_nll,
+                "lr": lr,
+                "bond_dims": self.mps.bond_dims,
+            }
+            if val_data is not None:
+                record["val_nll"] = self._evaluate_nll(val_data)
+ 
+            history.append(record)
  
             if train_nll < best_nll - 1e-4:
                 best_nll = train_nll
@@ -229,6 +241,8 @@ class DMRGTrainer:
                     wait = 0
                     if lr < cfg.lr_min:
                         break
+
+            return history
 
 def dmrg_train(
     mps: nn.Module,

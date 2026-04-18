@@ -13,7 +13,14 @@ class DMRGConfig:
     svd_cutoff: float = 1e-8
     lr: float = 0.01
     num_loops: int = 20
-    batch_size: int = 256   
+    batch_size: int = 256
+    lr_shrink: float = 0.5
+    lr_min: float = 1e-6
+    patience: int = 5
+    adaptive_lr: bool = True
+    plateau_factor: float = 10.0
+    plateau_threshold: float = 1e-4 
+
 
 class DMRGTrainer:
     def __init__(self, mps: nn.Module, config: Optional[DMRGConfig] = None):
@@ -147,9 +154,19 @@ class DMRGTrainer:
             for _ in range(cfg.num_descent_steps):
                 grad = self._compute_gradient(k, theta, left_env, right_env, configurations)
                 grad_norm = grad.norm().item()
+
                 if grad_norm > cfg.safe_threshold:
                     grad = grad * (cfg.safe_threshold / grad_norm)
-                theta = theta - lr * grad
+                    grad_norm = cfg.safe_threshold
+
+                bond_lr = lr
+                if cfg.adaptive_lr:
+                    theta_norm = theta.norm().item()
+                    relative_grad = grad_norm / max(theta_norm, 1e-30)
+                    if relative_grad < cfg.plateau_threshold:
+                        bond_lr = lr * cfg.plateau_factor
+
+                theta = theta - bond_lr * grad
 
             self.mps.split_and_truncate(
                 k, theta, direction, cfg.max_bond_dim, cfg.svd_cutoff
@@ -159,6 +176,12 @@ class DMRGTrainer:
                 left_envs[k + 1] = self._update_left_env(left_envs[k], k, configurations)
             elif direction == "left" and k > 0:
                 right_envs[k] = self._update_right_env(right_envs[k + 1], k + 1, configurations)
+
+    @torch.no_grad()
+    def _evaluate_nll(self, data: torch.Tensor, max_samples: int = 2048) -> float:
+        n = min(len(data), max_samples)
+        idx = torch.randint(0, len(data), (n,), device=data.device)
+        return self.mps.nll(data[idx]).item()
 
     @torch.no_grad()
     def train(
@@ -178,6 +201,8 @@ class DMRGTrainer:
         self.mps.left_canonicalize()
 
         lr = cfg.lr
+        best_nll = float('inf')
+        wait = 0
 
         for _ in range(cfg.num_loops):
             idx = torch.randint(0, len(train_data), (cfg.batch_size,), device=device)
@@ -192,6 +217,19 @@ class DMRGTrainer:
             right_env = self._build_right_envs(batch)
             self._sweep(batch, "right", lr, left_env, right_env)
 
+            train_nll = self._evaluate_nll(train_data)
+ 
+            if train_nll < best_nll - 1e-4:
+                best_nll = train_nll
+                wait = 0
+            else:
+                wait += 1
+                if wait >= cfg.patience:
+                    lr *= cfg.lr_shrink
+                    wait = 0
+                    if lr < cfg.lr_min:
+                        break
+
 def dmrg_train(
     mps: nn.Module,
     train_data: torch.Tensor,
@@ -203,6 +241,12 @@ def dmrg_train(
     num_loops: int = 20,
     num_descent_steps: int = 1,
     batch_size: int = 256,
+    lr_shrink: float = 0.5,
+    lr_min: float = 1e-6,
+    patience: int = 5,
+    adaptive_lr: bool = True,
+    plateau_factor: float = 10.0,
+    plateau_threshold: float = 1e-4,
 ) -> List[Dict]:
     """
     Train an MPS Born Machine with DMRG two-site updates.
@@ -221,5 +265,11 @@ def dmrg_train(
         lr=lr,
         num_loops=num_loops,
         batch_size=batch_size,
+        lr_shrink=lr_shrink,
+        lr_min=lr_min,
+        patience=patience,
+        adaptive_lr=adaptive_lr,
+        plateau_factor=plateau_factor,
+        plateau_threshold=plateau_threshold,
     )
     return DMRGTrainer(mps, config).train(train_data, val_data)

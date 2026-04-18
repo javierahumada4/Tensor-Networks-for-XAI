@@ -218,6 +218,7 @@ class MPS(nn.Module):
         self._center = center
         self._is_canonical = True
 
+    @staticmethod
     def _truncation_rank(
         self,
         S: torch.Tensor,
@@ -375,3 +376,14 @@ class MPS(nn.Module):
             ent = -(p * p.clamp_min(1e-30).log()).sum()
             entropies.append(ent.item())
         return entropies
+    
+    @property
+    def bond_dims(self) -> List[int]:
+        return [self.site_tensors[k].shape[2] for k in range(self.num_sites - 1)]
+
+    @property
+    def num_parameters(self) -> int:
+        n = sum(t.numel() for t in self.site_tensors)
+        if self.dtype in (torch.complex64, torch.complex128):
+            n *= 2
+        return n

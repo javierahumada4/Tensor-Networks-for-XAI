@@ -620,6 +620,138 @@ class MPS(nn.Module):
         S_ij = -(eigs * eigs.log()).sum().item()
  
         return S_i + S_j - S_ij
+    
+    @torch.no_grad()
+    def sample(self, num_samples: int = 1) -> torch.Tensor:
+        """
+        Draw exact, independent samples from P(v) = |Ψ(v)|² / Z.
+        """
+        self.left_canonicalize()
+ 
+        device = self.site_tensors[0].device
+        N = self.num_sites
+        d = self.physical_dim
+        is_complex = self.dtype in (torch.complex64, torch.complex128)
+ 
+        samples = torch.zeros(num_samples, N, dtype=torch.long, device=device)
+ 
+        A_last = self.site_tensors[N - 1].data
+        matrices = A_last.permute(1, 0, 2).squeeze(2)
+
+        if is_complex:
+            sq_norms = matrices.real.square() + matrices.imag.square()
+        else:
+            sq_norms = matrices.square()
+        probs = sq_norms.sum(dim=1)
+        probs = probs / probs.sum().clamp_min(1e-30)
+ 
+        chosen = torch.multinomial(
+            probs.unsqueeze(0).expand(num_samples, -1), 1
+        ).squeeze(1)
+        samples[:, N - 1] = chosen
+ 
+        x = matrices[chosen]
+ 
+        for k in range(N - 2, -1, -1):
+            A_k = self.site_tensors[k].data
+            mats = A_k.permute(1, 0, 2)
+
+            candidates = torch.matmul(mats, x.T)
+            candidates = candidates.permute(2, 0, 1)
+ 
+            if is_complex:
+                sq = candidates.real.square() + candidates.imag.square()
+            else:
+                sq = candidates.square()
+            cond_probs = sq.sum(dim=2)
+            cond_probs = cond_probs / cond_probs.sum(dim=1, keepdim=True).clamp_min(1e-30)
+ 
+            chosen = torch.multinomial(cond_probs, 1).squeeze(1)
+            samples[:, k] = chosen
+
+            idx = chosen.unsqueeze(1).unsqueeze(2).expand(
+                num_samples, 1, candidates.shape[2]
+            )
+            x = candidates.gather(1, idx).squeeze(1)
+ 
+        return samples
+    
+    @torch.no_grad()
+    def sample_conditional(
+        self,
+        known: torch.Tensor,
+        mask: torch.Tensor,
+        num_samples: int = 1,
+    ) -> torch.Tensor:
+        """
+        Conditional sampling: generate completions for partially known
+        configurations.
+ 
+        For sites where ``mask[k] == True`` the value in ``known[k]`` is
+        kept fixed; the remaining sites are sampled from
+        P(v_free | v_fixed).
+        """
+        assert known.shape[0] == self.num_sites
+        assert mask.shape[0] == self.num_sites
+ 
+        self.left_canonicalize()
+ 
+        device = self.site_tensors[0].device
+        N = self.num_sites
+        d = self.physical_dim
+        is_complex = self.dtype in (torch.complex64, torch.complex128)
+ 
+        known = known.to(device)
+        mask = mask.to(device)
+        samples = torch.zeros(num_samples, N, dtype=torch.long, device=device)
+ 
+        A_last = self.site_tensors[N - 1].data
+        matrices = A_last.permute(1, 0, 2).squeeze(2)
+ 
+        if mask[N - 1]:
+            chosen = known[N - 1].expand(num_samples)
+        else:
+            if is_complex:
+                sq_norms = matrices.real.square() + matrices.imag.square()
+            else:
+                sq_norms = matrices.square()
+            probs = sq_norms.sum(dim=1)
+            probs = probs / probs.sum().clamp_min(1e-30)
+            chosen = torch.multinomial(
+                probs.unsqueeze(0).expand(num_samples, -1), 1
+            ).squeeze(1)
+ 
+        samples[:, N - 1] = chosen
+        x = matrices[chosen]
+ 
+        for k in range(N - 2, -1, -1):
+            A_k = self.site_tensors[k].data
+            mats = A_k.permute(1, 0, 2)
+ 
+            candidates = torch.matmul(mats, x.T)
+            candidates = candidates.permute(2, 0, 1)
+ 
+            if mask[k]:
+                chosen = known[k].expand(num_samples)
+            else:
+                if is_complex:
+                    sq = candidates.real.square() + candidates.imag.square()
+                else:
+                    sq = candidates.square()
+                cond_probs = sq.sum(dim=2)
+                cond_probs = cond_probs / cond_probs.sum(
+                    dim=1, keepdim=True
+                ).clamp_min(1e-30)
+                chosen = torch.multinomial(cond_probs, 1).squeeze(1)
+ 
+            samples[:, k] = chosen
+ 
+            idx = chosen.unsqueeze(1).unsqueeze(2).expand(
+                num_samples, 1, candidates.shape[2]
+            )
+            x = candidates.gather(1, idx).squeeze(1)
+ 
+        return samples
 
 
 

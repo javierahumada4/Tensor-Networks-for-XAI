@@ -386,3 +386,240 @@ class MPS(nn.Module):
         if self.dtype in (torch.complex64, torch.complex128):
             n *= 2
         return n
+    
+    def _apply_transfer_left(self, L: torch.Tensor, A: torch.Tensor) -> torch.Tensor:
+        matrices = A.permute(1, 0, 2)
+        L_times_conj = torch.matmul(L, matrices.conj())
+        per_s = torch.matmul(matrices.transpose(1, 2), L_times_conj)
+        return per_s.sum(dim = 0)
+    
+    def _apply_transfer_right(self, R: torch.Tensor, A: torch.Tensor) -> torch.Tensor:
+        matrices = A.permute(1, 0, 2)
+        M_times_R = torch.matmul(matrices, R)
+        per_s = torch.matmul(M_times_R, matrices.conj().transpose(1, 2))
+        return per_s.sum(dim = 0)
+    
+    def _left_transfer_envs(self) -> List[torch.Tensor]:
+        """
+        Build left transfer matrices for every bond
+        """
+        device = self.site_tensors[0].device
+        envs: List[torch.Tensor] = [torch.ones(1, 1, dtype=self.dtype, device=device)]
+        for k in range(self.num_sites):
+            envs.append(self._apply_transfer_left(envs[k], self.site_tensors[k].data))
+        return envs
+    
+    def _right_transfer_envs(self) -> List[torch.Tensor]:
+        """
+        Build right transfer matrices for every bond.
+        """
+        N = self.num_sites
+        device = self.site_tensors[0].device
+        envs: List[Optional[torch.Tensor]] = [None] * N
+        envs[N - 1] = torch.ones(1, 1, dtype=self.dtype, device=device)
+        for k in range(N - 1, 0, -1):
+            envs[k - 1] = self._apply_transfer_right(envs[k], self.site_tensors[k].data)
+        return envs
+    
+    def _open_site_rdm(self, L: torch.Tensor, A: torch.Tensor, R: torch.Tensor) -> torch.Tensor:
+        """
+        Single-site RDM kernel (un-normalised).
+        """
+        physical_dim = A.shape[1]
+        matrices = A.permute(1, 0, 2)
+
+        temp = torch.matmul(torch.matmul(L.T, matrices), R)
+        conj_flat = matrices.conj().reshape(physical_dim, -1)
+        temp_flat = temp.reshape(physical_dim, -1)
+
+        return torch.matmul(temp_flat, conj_flat.T)
+    
+    def _open_two_sites_M(self, L: torch.Tensor, A: torch.Tensor) -> torch.Tensor:
+        """
+        First step of two-site RDM: leave one physical index pair open.
+        """
+        matrices = A.permute(1, 0, 2)
+        conj = matrices.conj()
+        LA = torch.matmul(L.T, matrices)
+        return torch.matmul(LA.permute(0, 2, 1).unsqueeze(1), conj.unsqueeze(0))
+    
+    def _propagate_M(self, M: torch.Tensor, A: torch.Tensor) -> torch.Tensor:
+        """
+        Propagate the open two-index tensor M through an intermediate site
+        by tracing over its physical index (transfer matrix).
+        """
+        rdm_dim = M.shape[0]
+        physical_dim = A.shape[1]
+        bond_dim_right = A.shape[2]
+
+        matrices = A.permute(1, 0, 2)
+        conj = matrices.conj()
+
+        M_flat = M.reshape(rdm_dim * rdm_dim, M.shape[2], M.shape[3])
+        M_new = torch.zeros(rdm_dim * rdm_dim, bond_dim_right, bond_dim_right, dtype=M.dtype, device=M.device)
+
+        for p in range(physical_dim):
+            temp = torch.matmul(M_flat, conj[p]) 
+            M_new = M_new + torch.matmul(matrices[p].T, temp) 
+        
+        return M_new.reshape(rdm_dim, rdm_dim, bond_dim_right, bond_dim_right)
+    
+    @torch.no_grad()
+    def single_site_rdm(self, site: int) -> torch.Tensor:
+        """
+        Reduced density matrix for a single site (feature).
+ 
+            ρ_k = Tr_{≠k}( |Ψ⟩⟨Ψ| )
+ 
+        Returns a (d, d) Hermitian matrix normalised to trace 1.
+        The diagonal entries give P(v_k = s) for each physical value s.
+        """
+        assert 0 <= site < self.num_sites
+        left = self._left_transfer_envs()
+        right = self._right_transfer_envs()
+ 
+        rdm = self._open_site_rdm(left[site], self.site_tensors[site].data, right[site])
+ 
+        tr = rdm.diagonal().real.sum().clamp_min(1e-30)
+        return rdm / tr
+    
+    @torch.no_grad()
+    def two_site_rdm(self, site_i: int, site_j: int) -> torch.Tensor:
+        """
+        Reduced density matrix for two sites (features).
+ 
+            ρ_{ij} = Tr_{≠i,j}( |Ψ⟩⟨Ψ| )
+ 
+        Returns a (d, d, d, d) tensor with index order [s_i, s_j, t_i, t_j],
+        normalised so that  Σ_{s_i, s_j} ρ[s_i, s_j, s_i, s_j] = 1.
+        """
+        assert 0 <= site_i < site_j < self.num_sites
+        d = self.physical_dim
+ 
+        left = self._left_transfer_envs()
+        right = self._right_transfer_envs()
+ 
+        L = left[site_i]
+        R = right[site_j]
+        A_i = self.site_tensors[site_i].data
+        A_j = self.site_tensors[site_j].data
+ 
+        M = self._open_two_sites_M(L, A_i)
+ 
+        for m in range(site_i + 1, site_j):
+            M = self._propagate_M(M, self.site_tensors[m].data)
+ 
+        matrices_j = A_j.permute(1, 0, 2)
+        conj_j     = matrices_j.conj()
+        AjR = torch.matmul(matrices_j, R)
+ 
+        rdm = torch.zeros(d, d, d, d, dtype=M.dtype, device=M.device)
+        for ti in range(d):
+            for tj in range(d):
+                temp = torch.matmul(M[:, ti], conj_j[tj])
+                rdm[:, :, ti, tj] = torch.matmul(temp.reshape(d, -1), AjR.reshape(d, -1).T)
+ 
+        trace = sum(rdm[s, t, s, t] for s in range(d) for t in range(d)).real.clamp_min(1e-30)
+        return rdm / trace
+    
+    @torch.no_grad()
+    def conditional_rdm(
+        self,
+        site_i: int,
+        site_j: int,
+        value_j: int,
+    ) -> torch.Tensor:
+        """
+        RDM at site i conditioned on site j having a fixed value.
+ 
+        Returns a (d, d) matrix.  Diagonal entries give P(v_i | v_j = value_j).
+        """
+        assert 0 <= site_i < self.num_sites
+        assert 0 <= site_j < self.num_sites
+        assert site_i != site_j
+        assert 0 <= value_j < self.physical_dim
+ 
+        lower, higher = min(site_i, site_j), max(site_i, site_j)
+ 
+        left = self._left_transfer_envs()
+        right = self._right_transfer_envs()
+ 
+        L = left[lower]
+        R = right[higher]
+        A_lower = self.site_tensors[lower].data
+        A_higher = self.site_tensors[higher].data
+ 
+        if site_i < site_j:
+            M = self._open_two_sites_M(L, A_lower)
+ 
+            for m in range(lower + 1, higher):
+                M = self._propagate_M(M, self.site_tensors[m].data)
+ 
+            Fj = A_higher[:, value_j, :]
+            RC = Fj @ R @ Fj.conj().T
+            rdm = (M * RC).sum(dim=(-2, -1))
+        else:
+            Fj = A_lower[:, value_j, :]
+            LC = Fj.conj().T @ L @ Fj
+ 
+            for m in range(lower + 1, higher):
+                LC = self._apply_transfer_left(LC, self.site_tensors[m].data)
+ 
+            rdm = self._open_site_rdm(LC, A_higher, R)
+ 
+        trace = rdm.diagonal().real.sum().clamp_min(1e-30)
+        return rdm / trace
+    
+    @torch.no_grad()
+    def feature_probabilities(self, site: int) -> torch.Tensor:
+        """
+        Marginal probability distribution P(v_k) for a single site.
+ 
+        Equivalent to the diagonal of the single-site RDM.
+        Returns a real (d,) tensor that sums to 1.
+        """
+        rdm = self.single_site_rdm(site)
+        return rdm.diagonal().real
+ 
+    @torch.no_grad()
+    def von_neumann_entropy_rdm(self, site: int) -> float:
+        """
+        Von Neumann entropy of the single-site RDM:
+ 
+            S = −Tr(ρ log ρ)
+ 
+        Measures how entangled the feature at *site* is with all the
+        other features
+        """
+        rdm = self.single_site_rdm(site)
+        eigenvalues = torch.linalg.eigvalsh(rdm.real)
+        eigenvalues = eigenvalues.clamp_min(1e-30)
+        return -(eigenvalues * eigenvalues.log()).sum().item()
+ 
+    @torch.no_grad()
+    def mutual_information(self, site_i: int, site_j: int) -> float:
+        """
+        Mutual information between two sites:
+ 
+            I(i; j) = S(ρ_i) + S(ρ_j) − S(ρ_{ij})
+ 
+        Quantifies total (including non-linear) correlation between two
+        features.  Used to build the MI heatmap for feature
+        clustering and ordering optimisation.
+        """
+        lo, hi = min(site_i, site_j), max(site_i, site_j)
+ 
+        S_i = self.von_neumann_entropy_rdm(lo)
+        S_j = self.von_neumann_entropy_rdm(hi)
+ 
+        rdm_ij = self.two_site_rdm(lo, hi)
+        d = self.physical_dim
+        rho_matrix = rdm_ij.reshape(d * d, d * d)
+        eigs = torch.linalg.eigvalsh(rho_matrix.real)
+        eigs = eigs.clamp_min(1e-30)
+        S_ij = -(eigs * eigs.log()).sum().item()
+ 
+        return S_i + S_j - S_ij
+
+
+

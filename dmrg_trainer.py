@@ -242,7 +242,7 @@ class DMRGTrainer:
                     if lr < cfg.lr_min:
                         break
 
-            return history
+        return history
 
 def dmrg_train(
     mps: nn.Module,

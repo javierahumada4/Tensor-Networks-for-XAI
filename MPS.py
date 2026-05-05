@@ -73,13 +73,25 @@ class MPS(nn.Module):
 
         return nn.ParameterList(tensor_list)
     
+    @torch.no_grad()
+    def normalize_state(self) -> None:
+        """
+        Rescale the MPS so that <psi|psi> = 1.
+        """
+        log_z = self.log_norm()
+        scale = torch.exp(-0.5 * log_z / self.num_sites)
+        for p in self.site_tensors:
+            p.data = p.data * scale
+    
     def psi(self, configurations: torch.Tensor) -> torch.Tensor:
         """
         Computes the MPS amplitude Psi(v) for a batch of configurations.
         """
+        if configurations.dtype != torch.long:
+            configurations = configurations.long()
         batch_size, num_sites = configurations.shape
         assert num_sites == self.num_sites
-
+        
         tensor = self.site_tensors[0]
         values = configurations[:, 0]
         env = tensor[:, values, :].permute(1, 0, 2)
@@ -379,6 +391,11 @@ class MPS(nn.Module):
     @property
     def bond_dims(self) -> List[int]:
         return [self.site_tensors[k].shape[2] for k in range(self.num_sites - 1)]
+    
+    @property
+    def full_bond_dims(self) -> List[int]:
+        """All bond dimensions including boundaries D_0=D_N=1  (length N+1)."""
+        return [1] + self.bond_dims + [1]
 
     @property
     def num_parameters(self) -> int:
@@ -580,6 +597,32 @@ class MPS(nn.Module):
         """
         rdm = self.single_site_rdm(site)
         return rdm.diagonal().real
+    
+    @torch.no_grad()
+    def all_single_site_rdms(self) -> List[torch.Tensor]:
+        """
+        Single-site RDMs for every site.
+        """
+        left = self._left_transfer_envs()
+        right = self._right_transfer_envs()
+        rdms: List[torch.Tensor] = []
+        for k in range(self.num_sites):
+            rdm = self._open_site_rdm(left[k], self.site_tensors[k].data, right[k])
+            tr = rdm.diagonal().real.sum().clamp_min(1e-30)
+            rdms.append(rdm / tr)
+        return rdms
+    
+    @torch.no_grad()
+    def all_feature_probabilities(self) -> torch.Tensor:
+        """
+        Marginal probabilities P(v_k = s) for every site k and value s.
+ 
+        Returns a real (num_sites, physical_dim) tensor whose rows sum to 1.
+        Faster than a Python loop over `feature_probabilities(k)`.
+        """
+        rdms = self.all_single_site_rdms()
+        out = torch.stack([r.diagonal().real for r in rdms], dim=0)
+        return out
  
     @torch.no_grad()
     def von_neumann_entropy_rdm(self, site: int) -> float:
@@ -595,6 +638,18 @@ class MPS(nn.Module):
         eigenvalues = torch.linalg.eigvalsh(rdm.real)
         eigenvalues = eigenvalues.clamp_min(1e-30)
         return -(eigenvalues * eigenvalues.log()).sum().item()
+    
+    @torch.no_grad()
+    def all_single_site_entropies(self) -> torch.Tensor:
+        """
+        Von Neumann entropies S(ρ_k) for every site k.
+        """
+        rdms = self.all_single_site_rdms()
+        out = torch.zeros(self.num_sites, dtype=torch.float64)
+        for k, r in enumerate(rdms):
+            eigs = torch.linalg.eigvalsh(r.real).clamp_min(1e-30)
+            out[k] = -(eigs * eigs.log()).sum().item()
+        return out
  
     @torch.no_grad()
     def mutual_information(self, site_i: int, site_j: int) -> float:

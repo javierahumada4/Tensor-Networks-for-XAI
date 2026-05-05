@@ -109,26 +109,28 @@ class DMRGTrainer:
         
         psi_safe = psi_v.clone()
         psi_safe[psi_safe.abs() < 1e-30] = 1e-30
-
-        term2 = torch.zeros_like(theta)
-        for s in range(physical_dim):
-            for t in range(physical_dim):
-                mask = (v_k == s) & (v_k1 == t)
-                if not mask.any():
-                    continue
-                left_env_masked = left_env[mask]
-                right_env_masked = right_env[mask]
-                psi_inv = 1.0 / psi_safe[mask]
-
-                if theta.is_complex():
-                    contribution = (left_env_masked.conj() * psi_inv.unsqueeze(1)).T @ right_env_masked
-                else:
-                    contribution = (left_env_masked * psi_inv.unsqueeze(1)).T @ right_env_masked
-
-                term2[:, s, t, :] = contribution
-
+        psi_inv = 1.0 / psi_safe
+ 
+        D_l, _, _, D_r = theta.shape
+ 
+        if theta.is_complex():
+            L_w = left_env.conj() * psi_inv.unsqueeze(1)
+        else:
+            L_w = left_env * psi_inv.unsqueeze(1)
+ 
+        contributions = L_w.unsqueeze(2) * right_env.unsqueeze(1)
+ 
+        flat_idx = v_k * physical_dim + v_k1
+        term2_flat = torch.zeros(physical_dim * physical_dim, D_l, D_r,
+                                 dtype=theta.dtype, device=theta.device)
+        term2_flat.index_add_(0, flat_idx, contributions)
+ 
+        term2 = (term2_flat
+                 .view(physical_dim, physical_dim, D_l, D_r)
+                 .permute(2, 0, 1, 3)
+                 .contiguous())
         term2 = (2.0 / batch_size) * term2
-
+ 
         return term1 - term2
     
     @torch.no_grad()

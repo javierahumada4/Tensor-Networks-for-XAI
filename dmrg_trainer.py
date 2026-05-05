@@ -180,7 +180,9 @@ class DMRGTrainer:
     @torch.no_grad()
     def _evaluate_nll(self, data: torch.Tensor, max_samples: int = 2048) -> float:
         n = min(len(data), max_samples)
-        idx = torch.randint(0, len(data), (n,), device=data.device)
+        if n == len(data):
+            return self.mps.nll(data).item()
+        idx = torch.randperm(len(data), device=data.device)[:n]
         return self.mps.nll(data[idx]).item()
 
     @torch.no_grad()

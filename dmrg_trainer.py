@@ -19,7 +19,9 @@ class DMRGConfig:
     patience: int = 5
     adaptive_lr: bool = True
     plateau_factor: float = 10.0
-    plateau_threshold: float = 1e-4 
+    plateau_threshold: float = 1e-4
+    lr_cap: float = 1.0
+    batches_per_loop: int = 0 
 
 
 class DMRGTrainer:
@@ -165,6 +167,7 @@ class DMRGTrainer:
                     relative_grad = grad_norm / max(theta_norm, 1e-30)
                     if relative_grad < cfg.plateau_threshold:
                         bond_lr = lr * cfg.plateau_factor
+                bond_lr = min(bond_lr, cfg.lr_cap)
 
                 theta = theta - bond_lr * grad
 
@@ -199,6 +202,8 @@ class DMRGTrainer:
         train_data = train_data.to(device)
         if val_data is not None:
             val_data = val_data.to(device)
+        if train_data.dtype != torch.long:
+            train_data = train_data.long()
 
         self.mps.left_canonicalize()
 
@@ -207,21 +212,36 @@ class DMRGTrainer:
         wait = 0
         history: List[Dict] = []
 
+        if cfg.batches_per_loop > 0:
+            n_batches = cfg.batches_per_loop
+        else:
+            n_batches = max(1, (len(train_data) + cfg.batch_size - 1) // cfg.batch_size)
+
         for loop in range(cfg.num_loops):
-            idx = torch.randint(0, len(train_data), (cfg.batch_size,), device=device)
-            batch = train_data[idx]
-            left_env = self._build_left_envs(batch)
-            right_env = self._build_right_envs(batch)
-            self._sweep(batch, "left", lr, left_env, right_env)
-
-            idx = torch.randint(0, len(train_data), (cfg.batch_size,), device=device)
-            batch = train_data[idx]
-            left_env = self._build_left_envs(batch)
-            right_env = self._build_right_envs(batch)
-            self._sweep(batch, "right", lr, left_env, right_env)
-
+            perm = torch.randperm(len(train_data), device=device)
+            for b in range(n_batches):
+                start = (b * cfg.batch_size) % len(train_data)
+                idx = perm[start:start + cfg.batch_size]
+                if len(idx) < 2:
+                    continue
+                batch = train_data[idx]
+                left_env = self._build_left_envs(batch)
+                right_env = self._build_right_envs(batch)
+                self._sweep(batch, "left", lr, left_env, right_env)
+ 
+            perm = torch.randperm(len(train_data), device=device)
+            for b in range(n_batches):
+                start = (b * cfg.batch_size) % len(train_data)
+                idx = perm[start:start + cfg.batch_size]
+                if len(idx) < 2:
+                    continue
+                batch = train_data[idx]
+                left_env = self._build_left_envs(batch)
+                right_env = self._build_right_envs(batch)
+                self._sweep(batch, "right", lr, left_env, right_env)
+ 
             train_nll = self._evaluate_nll(train_data)
-
+ 
             record: Dict = {
                 "loop": loop,
                 "train_nll": train_nll,
@@ -243,7 +263,7 @@ class DMRGTrainer:
                     wait = 0
                     if lr < cfg.lr_min:
                         break
-
+ 
         return history
 
 def dmrg_train(
@@ -263,6 +283,8 @@ def dmrg_train(
     adaptive_lr: bool = True,
     plateau_factor: float = 10.0,
     plateau_threshold: float = 1e-4,
+    lr_cap: float = 1.0,
+    batches_per_loop: int = 0,
 ) -> List[Dict]:
     """
     Train an MPS Born Machine with DMRG two-site updates.
@@ -287,5 +309,7 @@ def dmrg_train(
         adaptive_lr=adaptive_lr,
         plateau_factor=plateau_factor,
         plateau_threshold=plateau_threshold,
+        lr_cap=lr_cap,
+        batches_per_loop=batches_per_loop,
     )
     return DMRGTrainer(mps, config).train(train_data, val_data)

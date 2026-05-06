@@ -19,16 +19,16 @@ class MPS(nn.Module):
     ):
         super().__init__()
 
-        assert num_sites >= 2, "num_sites must be >= 2"
-        assert bond_dim >= 1, "bond_dim must be >= 1"
-        assert physical_dim >= 2, "physical_dim must be >= 2"
-
-        assert dtype in (
-            torch.float32,
-            torch.float64,
-            torch.complex64,
-            torch.complex128
-        ), f"Unsupported dtype: {dtype}"
+        if num_sites < 2:
+            raise ValueError(f"num_sites must be >= 2, got {num_sites}")
+        if bond_dim < 1:
+            raise ValueError(f"bond_dim must be >= 1, got {bond_dim}")
+        if physical_dim < 2:
+            raise ValueError(f"physical_dim must be >= 2, got {physical_dim}")
+        if dtype not in (torch.float32, torch.float64, torch.complex64, torch.complex128):
+            raise TypeError(
+                f"Unsupported dtype: {dtype}. Use float32/float64/complex64/complex128."
+            )
 
         self.num_sites = num_sites
         self.bond_dim = bond_dim
@@ -69,15 +69,29 @@ class MPS(nn.Module):
 
         return nn.ParameterList(tensor_list)
     
-    @torch.no_grad()
-    def normalize_state(self) -> None:
-        """
-        Rescale the MPS so that <psi|psi> = 1.
-        """
-        log_z = self.log_norm()
-        scale = torch.exp(-0.5 * log_z / self.num_sites)
-        for p in self.site_tensors:
-            p.data = p.data * scale
+    # ----------------------------------------------------------------------
+    # Properties
+    # ----------------------------------------------------------------------
+    
+    @property
+    def bond_dims(self) -> List[int]:
+        return [self.site_tensors[k].shape[2] for k in range(self.num_sites - 1)]
+    
+    @property
+    def full_bond_dims(self) -> List[int]:
+        """All bond dimensions including boundaries D_0=D_N=1  (length N+1)."""
+        return [1] + self.bond_dims + [1]
+
+    @property
+    def num_parameters(self) -> int:
+        n = sum(t.numel() for t in self.site_tensors)
+        if self.dtype in (torch.complex64, torch.complex128):
+            n *= 2
+        return n
+    
+    # ----------------------------------------------------------------------
+    # Amplitudes, norms, probabilities
+    # ----------------------------------------------------------------------
     
     def psi(self, configurations: torch.Tensor) -> torch.Tensor:
         """
@@ -86,7 +100,8 @@ class MPS(nn.Module):
         if configurations.dtype != torch.long:
             configurations = configurations.long()
         batch_size, num_sites = configurations.shape
-        assert num_sites == self.num_sites
+        if num_sites != self.num_sites:
+            raise ValueError(f"Expected {self.num_sites} sites, got {num_sites}")
         
         tensor = self.site_tensors[0]
         values = configurations[:, 0]
@@ -108,7 +123,8 @@ class MPS(nn.Module):
         if configurations.dtype != torch.long:
             configurations = configurations.long()
         batch_size, num_sites = configurations.shape
-        assert num_sites == self.num_sites
+        if num_sites != self.num_sites:
+            raise ValueError(f"Expected {self.num_sites} sites, got {num_sites}")
  
         device = configurations.device
  
@@ -200,7 +216,7 @@ class MPS(nn.Module):
         if reduction == "sum":
             return nll_values.sum()
 
-        raise ValueError(f"Unsupported reduction: {reduction}")
+        raise ValueError(f"Unsupported reduction: {reduction!r}. Use 'mean', 'sum', or 'none'.")
     
     @torch.no_grad()
     def anomaly_score(self, configurations: torch.Tensor) -> torch.Tensor:
@@ -214,6 +230,37 @@ class MPS(nn.Module):
         anomaly-detection pipelines.
         """
         return -self.log_prob(configurations)
+    
+    @torch.no_grad()
+    def normalize_state(self) -> None:
+        """
+        Rescale the MPS so that <psi|psi> = 1.
+        """
+        log_z = self.log_norm()
+        scale = torch.exp(-0.5 * log_z / self.num_sites)
+        for p in self.site_tensors:
+            p.data = p.data * scale
+
+    # ----------------------------------------------------------------------
+    # Canonicalization and tensor manipulation
+    # ----------------------------------------------------------------------
+
+    def _truncation_rank(
+        self,
+        S: torch.Tensor,
+        max_bond_dim: Optional[int],
+        cutoff: float,
+    ) -> int:
+        """
+        Determine how many singular values to keep.
+        """
+        n = len(S)
+        if cutoff > 0:
+            S_max = S[0].abs().clamp_min(1e-30)
+            n = max(int((S / S_max >= cutoff).sum().item()), 1)
+        if max_bond_dim is not None:
+            n = min(n, max_bond_dim)
+        return n
     
     @torch.no_grad()
     def left_canonicalize(
@@ -320,27 +367,11 @@ class MPS(nn.Module):
         singular_values.reverse()
         return singular_values
     
-    def _truncation_rank(
-        self,
-        S: torch.Tensor,
-        max_bond_dim: Optional[int],
-        cutoff: float,
-    ) -> int:
-        """
-        Determine how many singular values to keep.
-        """
-        n = len(S)
-        if cutoff > 0:
-            S_max = S[0].abs().clamp_min(1e-30)
-            n = max(int((S / S_max >= cutoff).sum().item()), 1)
-        if max_bond_dim is not None:
-            n = min(n, max_bond_dim)
-        return n
-    
     def merge_sites(self, k: int) -> torch.Tensor:
         """
         """
-        assert 0 <= k < self.num_sites - 1
+        if not (0 <= k < self.num_sites - 1):
+            raise ValueError(f"Invalid bond index k={k}; expected 0 <= k < {self.num_sites - 1}")
 
         A_k  = self.site_tensors[k].data
         A_k1 = self.site_tensors[k + 1].data
@@ -370,49 +401,17 @@ class MPS(nn.Module):
         if direction == "right":
             self.site_tensors[k].data = U.reshape(D_l, d1, n)
             self.site_tensors[k + 1].data = (S.unsqueeze(1) * Vh).reshape(n, d2, D_r)
-        else:
+        elif direction == "left":
             self.site_tensors[k].data = (U * S.unsqueeze(0)).reshape(D_l, d1, n)
             self.site_tensors[k + 1].data = Vh.reshape(n, d2, D_r)
+        else:
+            raise ValueError(f"direction must be 'right' or 'left', got {direction!r}")
 
-        return S.detach().clone()
+        return S.detach().clone() 
     
-    @torch.no_grad()
-    def bond_entropies(
-        self,
-        max_bond_dim: Optional[int] = None,
-        cutoff: float = 0.0,
-    ) -> List[float]:
-        """
-         Bipartite von Neumann entropy at every bond:
- 
-            S(k) = −Σ_i p_i ln p_i,    p_i = σ_i² / Σ σ_j²
- 
-        where σ_i are the singular values at bond k.  Returns ``num_sites - 1`` values.
-        """
-        svs = self.left_canonicalize_svd(max_bond_dim=max_bond_dim, cutoff=cutoff)
-        entropies: List[float] = []
-        for S in svs:
-            p = S.square()
-            p = p / p.sum().clamp_min(1e-30)
-            ent = -(p * p.clamp_min(1e-30).log()).sum()
-            entropies.append(ent.item())
-        return entropies
-    
-    @property
-    def bond_dims(self) -> List[int]:
-        return [self.site_tensors[k].shape[2] for k in range(self.num_sites - 1)]
-    
-    @property
-    def full_bond_dims(self) -> List[int]:
-        """All bond dimensions including boundaries D_0=D_N=1  (length N+1)."""
-        return [1] + self.bond_dims + [1]
-
-    @property
-    def num_parameters(self) -> int:
-        n = sum(t.numel() for t in self.site_tensors)
-        if self.dtype in (torch.complex64, torch.complex128):
-            n *= 2
-        return n
+    # ----------------------------------------------------------------------
+    # Reduced density matrices: private kernels
+    # ----------------------------------------------------------------------
     
     def _apply_transfer_left(self, L: torch.Tensor, A: torch.Tensor) -> torch.Tensor:
         matrices = A.permute(1, 0, 2)
@@ -490,7 +489,11 @@ class MPS(nn.Module):
             M_new = M_new + torch.matmul(matrices[p].T, temp) 
         
         return M_new.reshape(rdm_dim, rdm_dim, bond_dim_right, bond_dim_right)
-    
+
+    # ----------------------------------------------------------------------
+    # Reduced density matrices: public API
+    # ----------------------------------------------------------------------
+
     @torch.no_grad()
     def single_site_rdm(self, site: int) -> torch.Tensor:
         """
@@ -501,7 +504,8 @@ class MPS(nn.Module):
         Returns a (d, d) Hermitian matrix normalised to trace 1.
         The diagonal entries give P(v_k = s) for each physical value s.
         """
-        assert 0 <= site < self.num_sites
+        if not (0 <= site < self.num_sites):
+            raise ValueError(f"site={site} out of range [0, {self.num_sites})")
         left = self._left_transfer_envs()
         right = self._right_transfer_envs()
  
@@ -509,6 +513,20 @@ class MPS(nn.Module):
  
         tr = rdm.diagonal().real.sum().clamp_min(1e-30)
         return rdm / tr
+    
+    @torch.no_grad()
+    def all_single_site_rdms(self) -> List[torch.Tensor]:
+        """
+        Single-site RDMs for every site.
+        """
+        left = self._left_transfer_envs()
+        right = self._right_transfer_envs()
+        rdms: List[torch.Tensor] = []
+        for k in range(self.num_sites):
+            rdm = self._open_site_rdm(left[k], self.site_tensors[k].data, right[k])
+            tr = rdm.diagonal().real.sum().clamp_min(1e-30)
+            rdms.append(rdm / tr)
+        return rdms
     
     @torch.no_grad()
     def two_site_rdm(self, site_i: int, site_j: int) -> torch.Tensor:
@@ -520,7 +538,11 @@ class MPS(nn.Module):
         Returns a (d, d, d, d) tensor with index order [s_i, s_j, t_i, t_j],
         normalised so that  Σ_{s_i, s_j} ρ[s_i, s_j, s_i, s_j] = 1.
         """
-        assert 0 <= site_i < site_j < self.num_sites
+        if not (0 <= site_i < site_j < self.num_sites):
+            raise ValueError(
+                f"Invalid (site_i, site_j) = ({site_i}, {site_j}); "
+                f"need 0 <= site_i < site_j < {self.num_sites}"
+            )
         d = self.physical_dim
  
         left = self._left_transfer_envs()
@@ -561,10 +583,14 @@ class MPS(nn.Module):
  
         Returns a (d, d) matrix.  Diagonal entries give P(v_i | v_j = value_j).
         """
-        assert 0 <= site_i < self.num_sites
-        assert 0 <= site_j < self.num_sites
-        assert site_i != site_j
-        assert 0 <= value_j < self.physical_dim
+        if not (0 <= site_i < self.num_sites):
+            raise ValueError(f"site_i={site_i} out of range")
+        if not (0 <= site_j < self.num_sites):
+            raise ValueError(f"site_j={site_j} out of range")
+        if site_i == site_j:
+            raise ValueError("site_i and site_j must differ")
+        if not (0 <= value_j < self.physical_dim):
+            raise ValueError(f"value_j={value_j} out of range [0, {self.physical_dim})")
  
         lower, higher = min(site_i, site_j), max(site_i, site_j)
  
@@ -597,6 +623,10 @@ class MPS(nn.Module):
         trace = rdm.diagonal().real.sum().clamp_min(1e-30)
         return rdm / trace
     
+    # ----------------------------------------------------------------------
+    # Marginals and entropies
+    # ----------------------------------------------------------------------
+    
     @torch.no_grad()
     def feature_probabilities(self, site: int) -> torch.Tensor:
         """
@@ -607,20 +637,6 @@ class MPS(nn.Module):
         """
         rdm = self.single_site_rdm(site)
         return rdm.diagonal().real
-    
-    @torch.no_grad()
-    def all_single_site_rdms(self) -> List[torch.Tensor]:
-        """
-        Single-site RDMs for every site.
-        """
-        left = self._left_transfer_envs()
-        right = self._right_transfer_envs()
-        rdms: List[torch.Tensor] = []
-        for k in range(self.num_sites):
-            rdm = self._open_site_rdm(left[k], self.site_tensors[k].data, right[k])
-            tr = rdm.diagonal().real.sum().clamp_min(1e-30)
-            rdms.append(rdm / tr)
-        return rdms
     
     @torch.no_grad()
     def all_feature_probabilities(self) -> torch.Tensor:
@@ -650,6 +666,32 @@ class MPS(nn.Module):
             eigs = torch.linalg.eigvalsh(r.real).clamp_min(1e-30)
             out[k] = -(eigs * eigs.log()).sum().item()
         return out
+    
+    @torch.no_grad()
+    def bond_entropies(
+        self,
+        max_bond_dim: Optional[int] = None,
+        cutoff: float = 0.0,
+    ) -> List[float]:
+        """
+         Bipartite von Neumann entropy at every bond:
+ 
+            S(k) = −Σ_i p_i ln p_i,    p_i = σ_i² / Σ σ_j²
+ 
+        where σ_i are the singular values at bond k.  Returns ``num_sites - 1`` values.
+        """
+        svs = self.left_canonicalize(truncate=True, max_bond_dim=max_bond_dim, cutoff=cutoff)
+        entropies: List[float] = []
+        for S in svs:
+            p = S.square()
+            p = p / p.sum().clamp_min(1e-30)
+            ent = -(p * p.clamp_min(1e-30).log()).sum()
+            entropies.append(ent.item())
+        return entropies
+    
+    # ----------------------------------------------------------------------
+    # Information theory
+    # ----------------------------------------------------------------------
  
     @torch.no_grad()
     def mutual_information(self, site_i: int, site_j: int) -> float:
@@ -662,10 +704,17 @@ class MPS(nn.Module):
         features.  Used to build the MI heatmap for feature
         clustering and ordering optimisation.
         """
+        if site_i == site_j:
+            raise ValueError("site_i and site_j must differ")
+
         lo, hi = min(site_i, site_j), max(site_i, site_j)
  
-        S_i = self.von_neumann_entropy_rdm(lo)
-        S_j = self.von_neumann_entropy_rdm(hi)
+        rdm_i = self.single_site_rdm(lo)
+        rdm_j = self.single_site_rdm(hi)
+        eigs_i = torch.linalg.eigvalsh(rdm_i.real).clamp_min(1e-30)
+        eigs_j = torch.linalg.eigvalsh(rdm_j.real).clamp_min(1e-30)
+        S_i = -(eigs_i * eigs_i.log()).sum().item()
+        S_j = -(eigs_j * eigs_j.log()).sum().item()
  
         rdm_ij = self.two_site_rdm(lo, hi)
         d = self.physical_dim
@@ -733,6 +782,10 @@ class MPS(nn.Module):
  
         return out
     
+    # ----------------------------------------------------------------------
+    # Sampling
+    # ----------------------------------------------------------------------
+    
     @torch.no_grad()
     def sample(self, num_samples: int = 1) -> torch.Tensor:
         """
@@ -799,8 +852,10 @@ class MPS(nn.Module):
         Conditional sampling: generate completions for partially known
         configurations.
         """
-        assert known.shape[0] == self.num_sites
-        assert mask.shape[0] == self.num_sites
+        if known.shape[0] != self.num_sites:
+            raise ValueError(f"known has {known.shape[0]} entries, expected {self.num_sites}")
+        if mask.shape[0] != self.num_sites:
+            raise ValueError(f"mask has {mask.shape[0]} entries, expected {self.num_sites}")
  
         N = self.num_sites
         device = self.site_tensors[0].device

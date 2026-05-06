@@ -203,48 +203,123 @@ class MPS(nn.Module):
         raise ValueError(f"Unsupported reduction: {reduction}")
     
     @torch.no_grad()
-    def left_canonicalize(self, up_to: Optional[int] = None) -> None:
+    def anomaly_score(self, configurations: torch.Tensor) -> torch.Tensor:
+        """
+        Per-sample anomaly score, defined as the negative log-likelihood:
+ 
+            score(v) = -log P(v)
+ 
+        Higher scores correspond to less probable configurations under the
+        learned model.  Used as the raw signal for thresholding in
+        anomaly-detection pipelines.
+        """
+        return -self.log_prob(configurations)
+    
+    @torch.no_grad()
+    def left_canonicalize(
+        self,
+        up_to: Optional[int] = None,
+        truncate: bool = False,
+        max_bond_dim: Optional[int] = None,
+        cutoff: float = 0.0,
+    ) -> Optional[List[torch.Tensor]]:
         """
         """
         if up_to is None:
             up_to = self.num_sites - 1
-        
+ 
+        if not truncate:
+            for site in range(up_to):
+                tensor = self.site_tensors[site].data
+                D_l, d, D_r = tensor.shape
+ 
+                Q, R = torch.linalg.qr(tensor.reshape(D_l * d, D_r))
+                new_D = Q.shape[-1]
+                self.site_tensors[site].data = Q.reshape(D_l, d, new_D)
+ 
+                next_tensor = self.site_tensors[site + 1].data
+                _, d_n, D_r2 = next_tensor.shape
+ 
+                self.site_tensors[site + 1].data = (
+                    R @ next_tensor.reshape(D_r, d_n * D_r2)
+                ).reshape(new_D, d_n, D_r2)
+            return None
+ 
+        singular_values: List[torch.Tensor] = []
         for site in range(up_to):
             tensor = self.site_tensors[site].data
             D_l, d, D_r = tensor.shape
-
-            Q, R = torch.linalg.qr(tensor.reshape(D_l * d, D_r))
-            new_D = Q.shape[-1]
-            self.site_tensors[site].data = Q.reshape(D_l, d, new_D)
-            
+ 
+            U, S, Vh = torch.linalg.svd(tensor.reshape(D_l * d, D_r), full_matrices=False)
+            n = self._truncation_rank(S, max_bond_dim, cutoff)
+            U, S, Vh = U[:, :n], S[:n], Vh[:n, :]
+ 
+            singular_values.append(S.detach().clone())
+            self.site_tensors[site].data = U.reshape(D_l, d, n)
+ 
+            SV = S.unsqueeze(1) * Vh
             next_tensor = self.site_tensors[site + 1].data
             _, d_n, D_r2 = next_tensor.shape
-
+ 
             self.site_tensors[site + 1].data = (
-                R @ next_tensor.reshape(D_r, d_n * D_r2)
-            ).reshape(new_D, d_n, D_r2)
+                SV @ next_tensor.reshape(D_r, d_n * D_r2)
+            ).reshape(n, d_n, D_r2)
+ 
+        return singular_values
 
     @torch.no_grad()
-    def right_canonicalize(self, from_site: Optional[int] = None) -> None:
+    def right_canonicalize(
+        self,
+        from_site: Optional[int] = None,
+        truncate: bool = False,
+        max_bond_dim: Optional[int] = None,
+        cutoff: float = 0.0,
+    ) -> Optional[List[torch.Tensor]]:
+        """
+        """
         if from_site is None:
             from_site = 1
-
+ 
+        if not truncate:
+            for site in range(self.num_sites - 1, from_site - 1, -1):
+                tensor = self.site_tensors[site].data
+                D_l, d, D_r = tensor.shape
+ 
+                Q, R = torch.linalg.qr(tensor.reshape(D_l, d * D_r).conj().T)
+                new_D = Q.shape[1]
+                self.site_tensors[site].data = Q.conj().T.reshape(new_D, d, D_r)
+ 
+                previous_tensor = self.site_tensors[site - 1].data
+                Rdag = R.conj().T
+                D_l2, d_p, _ = previous_tensor.shape
+ 
+                self.site_tensors[site - 1].data = (
+                    previous_tensor.reshape(D_l2 * d_p, D_l) @ Rdag
+                ).reshape(D_l2, d_p, new_D)
+            return None
+ 
+        singular_values: List[torch.Tensor] = []
         for site in range(self.num_sites - 1, from_site - 1, -1):
             tensor = self.site_tensors[site].data
             D_l, d, D_r = tensor.shape
-
-            Q, R = torch.linalg.qr(tensor.reshape(D_l, d * D_r).conj().T)
-            new_D = Q.shape[1]
-            self.site_tensors[site].data = Q.conj().T.reshape(new_D, d, D_r)
-
+ 
+            U, S, Vh = torch.linalg.svd(tensor.reshape(D_l, d * D_r), full_matrices=False)
+            n = self._truncation_rank(S, max_bond_dim, cutoff)
+            U, S, Vh = U[:, :n], S[:n], Vh[:n, :]
+ 
+            singular_values.append(S.detach().clone())
+            self.site_tensors[site].data = Vh.reshape(n, d, D_r)
+ 
+            US = U * S.unsqueeze(0)
             previous_tensor = self.site_tensors[site - 1].data
-            Rdag = R.conj().T
             D_l2, d_p, _ = previous_tensor.shape
-
             self.site_tensors[site - 1].data = (
-                previous_tensor.reshape(D_l2 * d_p, D_l) @ Rdag
-            ).reshape(D_l2, d_p, new_D)
-
+                previous_tensor.reshape(D_l2 * d_p, D_l) @ US
+            ).reshape(D_l2, d_p, n)
+ 
+        singular_values.reverse()
+        return singular_values
+    
     def _truncation_rank(
         self,
         S: torch.Tensor,
@@ -261,78 +336,6 @@ class MPS(nn.Module):
         if max_bond_dim is not None:
             n = min(n, max_bond_dim)
         return n
-
-    @torch.no_grad()
-    def left_canonicalize_svd(
-        self,
-        up_to: Optional[int] = None,
-        max_bond_dim: Optional[int] = None,
-        cutoff: float = 0.0
-    ) -> List[torch.Tensor]:
-        """
-        """
-        if up_to is None:
-            up_to = self.num_sites - 1
-        
-        singular_values = []
-
-        for site in range(up_to):
-            tensor = self.site_tensors[site].data
-            D_l, d, D_r = tensor.shape
-
-            U, S, Vh = torch.linalg.svd(tensor.reshape(D_l * d, D_r), full_matrices=False)
-            n = self._truncation_rank(S, max_bond_dim, cutoff)
-            U, S, Vh = U[:, :n], S[:n], Vh[:n, :]
-
-            singular_values.append(S.detach().clone())
-
-            self.site_tensors[site].data = U.reshape(D_l, d, n)
-
-            SV = S.unsqueeze(1) * Vh
-            next_tensor = self.site_tensors[site + 1].data
-            _, d_n, D_r2 = next_tensor.shape
-
-            self.site_tensors[site + 1].data = (
-                SV @ next_tensor.reshape(D_r, d_n * D_r2)
-            ).reshape(n, d_n, D_r2)
-        
-        return singular_values
-    
-    @torch.no_grad()
-    def right_canonicalize_svd(
-        self,
-        from_site: Optional[int] = None,
-        max_bond_dim: Optional[int] = None,
-        cutoff: float = 0.0,
-    ) -> List[torch.Tensor]:
-        """
-        """
-        if from_site is None:
-            from_site = 1
-
-        singular_values: List[torch.Tensor] = []
-
-        for site in range(self.num_sites - 1, from_site - 1, -1):
-            tensor = self.site_tensors[site].data
-            D_l, d, D_r = tensor.shape
-
-            U, S, Vh = torch.linalg.svd(tensor.reshape(D_l, d * D_r), full_matrices=False)
-            n = self._truncation_rank(S, max_bond_dim, cutoff)
-            U, S, Vh = U[:, :n], S[:n], Vh[:n, :]
-
-            singular_values.append(S.detach().clone())
-
-            self.site_tensors[site].data = Vh.reshape(n, d, D_r)
-
-            US = U * S.unsqueeze(0)
-            previous_tensor = self.site_tensors[site - 1].data
-            D_l2, d_p, _ = previous_tensor.shape
-            self.site_tensors[site - 1].data = (
-                previous_tensor.reshape(D_l2 * d_p, D_l) @ US
-            ).reshape(D_l2, d_p, n)
-
-        singular_values.reverse()
-        return singular_values
     
     def merge_sites(self, k: int) -> torch.Tensor:
         """
@@ -374,14 +377,17 @@ class MPS(nn.Module):
         return S.detach().clone()
     
     @torch.no_grad()
-    def entanglement_entropy(
+    def bond_entropies(
         self,
         max_bond_dim: Optional[int] = None,
         cutoff: float = 0.0,
     ) -> List[float]:
         """
-        Von Neumann entanglement entropy S(k) = −Σ_i p_i ln p_i at each bond,
-        where p_i = σ_i² / Σ σ_j².
+         Bipartite von Neumann entropy at every bond:
+ 
+            S(k) = −Σ_i p_i ln p_i,    p_i = σ_i² / Σ σ_j²
+ 
+        where σ_i are the singular values at bond k.  Returns ``num_sites - 1`` values.
         """
         svs = self.left_canonicalize_svd(max_bond_dim=max_bond_dim, cutoff=cutoff)
         entropies: List[float] = []
@@ -627,26 +633,16 @@ class MPS(nn.Module):
         rdms = self.all_single_site_rdms()
         out = torch.stack([r.diagonal().real for r in rdms], dim=0)
         return out
- 
-    @torch.no_grad()
-    def von_neumann_entropy_rdm(self, site: int) -> float:
-        """
-        Von Neumann entropy of the single-site RDM:
- 
-            S = −Tr(ρ log ρ)
- 
-        Measures how entangled the feature at *site* is with all the
-        other features
-        """
-        rdm = self.single_site_rdm(site)
-        eigenvalues = torch.linalg.eigvalsh(rdm.real)
-        eigenvalues = eigenvalues.clamp_min(1e-30)
-        return -(eigenvalues * eigenvalues.log()).sum().item()
     
     @torch.no_grad()
-    def all_single_site_entropies(self) -> torch.Tensor:
+    def site_entropies(self) -> torch.Tensor:
         """
-        Von Neumann entropies S(ρ_k) for every site k.
+        Single-site von Neumann entropy at every site:
+ 
+            S(ρ_k) = −Tr(ρ_k log ρ_k)
+ 
+        where ρ_k is the reduced density matrix of site k.  Returns a
+        ``(num_sites,)`` real tensor.
         """
         rdms = self.all_single_site_rdms()
         out = torch.zeros(self.num_sites, dtype=torch.float64)
@@ -684,17 +680,6 @@ class MPS(nn.Module):
     def mutual_information_matrix(self) -> torch.Tensor:
         """
         Full N×N mutual-information matrix in one pass.
- 
-        Builds the left and right transfer environments only once (cost
-        O(N · D^3)) and then computes every two-site entropy by reusing
-        them.  For arbitrary feature pairs the inner cost is dominated by
-        propagating the open two-site tensor M through the intermediate
-        sites, O((j-i) · D^3).  Total cost ~ O(N^2 · D^3 + N^3 · D^3),
-        much faster than calling `mutual_information(i, j)` N(N-1)/2
-        times (which would rebuild the envs every call).
- 
-        Returns a real (N, N) tensor.  Diagonal entries are filled with
-        the single-site von Neumann entropy S(ρ_k).
         """
         N = self.num_sites
         d = self.physical_dim
@@ -813,25 +798,6 @@ class MPS(nn.Module):
         """
         Conditional sampling: generate completions for partially known
         configurations.
- 
-        For sites where ``mask[k] == True`` the value in ``known[k]`` is
-        kept fixed; the remaining sites are sampled from P(v_free | v_fixed).
- 
-        Currently supported mask shapes:
- 
-        * No mask at all -> falls back to unconditional `sample`.
-        * All sites fixed -> returns the fixed vector replicated.
-        * All fixed sites form a contiguous block at the **right end** of
-          the chain (free sites at the left): uses `left_canonicalize`
-          and sweeps R -> L.
-        * All fixed sites form a contiguous block at the **left end**
-          (free sites at the right): uses `right_canonicalize` and
-          sweeps L -> R.
- 
-        For arbitrary scattered masks (free sites surrounded by fixed
-        sites) the correct distribution requires a ladder-shaped tensor
-        contraction (Han et al. 2018, Sec. II.C).  This case is not yet
-        implemented and raises ``NotImplementedError``.
         """
         assert known.shape[0] == self.num_sites
         assert mask.shape[0] == self.num_sites
@@ -871,7 +837,8 @@ class MPS(nn.Module):
         mask: torch.Tensor,
         num_samples: int,
     ) -> torch.Tensor:
-        """Conditional sampling with fixed bits at the right end of the chain."""
+        """
+        Conditional sampling with fixed bits at the right end of the chain."""
         self.left_canonicalize()
  
         device = self.site_tensors[0].device
@@ -929,7 +896,8 @@ class MPS(nn.Module):
         mask: torch.Tensor,
         num_samples: int,
     ) -> torch.Tensor:
-        """Conditional sampling with fixed bits at the left end of the chain.
+        """
+        Conditional sampling with fixed bits at the left end of the chain.
         """
         self.right_canonicalize(from_site=1)
  

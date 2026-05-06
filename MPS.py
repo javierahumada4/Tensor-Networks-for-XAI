@@ -116,7 +116,7 @@ class MPS(nn.Module):
             abs_sq = psi_values.square()
         return abs_sq.clamp_min(eps)
     
-    def log_amplitude_squared(self, configurations: torch.Tensor) -> torch.Tensor:
+    def log_amplitude_squared(self, configurations: torch.Tensor, eps: float = 1e-30) -> torch.Tensor:
         """
         Numerically stable log |Psi(v)|^2 with per-site rescaling.
         """
@@ -133,7 +133,7 @@ class MPS(nn.Module):
  
         log_scale = torch.zeros(batch_size, dtype=torch.float64, device=device)
  
-        env_abs_max = env.abs().amax(dim=1).clamp_min(1e-30)
+        env_abs_max = env.abs().amax(dim=1).clamp_min(eps)
         env = env / env_abs_max.unsqueeze(1).to(env.dtype)
         log_scale = log_scale + env_abs_max.double().log()
  
@@ -143,15 +143,15 @@ class MPS(nn.Module):
             selected_matrices = tensor[:, values, :].permute(1, 0, 2)
             env = torch.bmm(env.unsqueeze(1), selected_matrices).squeeze(1)
  
-            env_abs_max = env.abs().amax(dim=1).clamp_min(1e-30)
+            env_abs_max = env.abs().amax(dim=1).clamp_min(eps)
             env = env / env_abs_max.unsqueeze(1).to(env.dtype)
             log_scale = log_scale + env_abs_max.double().log()
  
         psi_rescaled = env.squeeze(1)
         if psi_rescaled.is_complex():
-            abs2 = (psi_rescaled.real.square() + psi_rescaled.imag.square()).clamp_min(1e-300)
+            abs2 = (psi_rescaled.real.square() + psi_rescaled.imag.square()).clamp_min(eps)
         else:
-            abs2 = psi_rescaled.square().clamp_min(1e-300)
+            abs2 = psi_rescaled.square().clamp_min(eps)
  
         log_abs2 = abs2.double().log() + 2.0 * log_scale
  

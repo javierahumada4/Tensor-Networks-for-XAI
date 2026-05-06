@@ -79,6 +79,19 @@ class DMRGTrainer:
         selected_matrices = tensor[:, configs[:, site], :].permute(1, 0, 2)
         return torch.bmm(selected_matrices, right_env.unsqueeze(2)).squeeze(2)
     
+    @staticmethod
+    def _safe_psi(psi_v: torch.Tensor, eps: float = 1e-30) -> torch.Tensor:
+        """
+        """
+        abs_psi = psi_v.abs()
+        small = abs_psi < eps
+        if psi_v.is_complex():
+            phase = torch.where(abs_psi > 0, psi_v / abs_psi.clamp_min(eps), torch.ones_like(psi_v))
+            return torch.where(small, phase * eps, psi_v)
+        else:
+            sign = torch.where(psi_v >= 0, torch.ones_like(psi_v), -torch.ones_like(psi_v))
+            return torch.where(small, sign * eps, psi_v)
+    
     def _compute_gradient(
         self,
         k: int,
@@ -107,18 +120,18 @@ class DMRGTrainer:
         psi_v = torch.bmm(left_env.unsqueeze(1),
                           torch.bmm(theta_selected, right_env.unsqueeze(2))).reshape(batch_size)
         
-        psi_safe = psi_v.clone()
-        psi_safe[psi_safe.abs() < 1e-30] = 1e-30
-        psi_inv = 1.0 / psi_safe
+        psi_safe = self._safe_psi(psi_v)
  
         D_l, _, _, D_r = theta.shape
  
         if theta.is_complex():
-            L_w = left_env.conj() * psi_inv.unsqueeze(1)
+            L_w = left_env.conj() / psi_safe.conj().unsqueeze(1)
+            R_w = right_env.conj()
         else:
-            L_w = left_env * psi_inv.unsqueeze(1)
+            L_w = left_env / psi_safe.unsqueeze(1)
+            R_w = right_env
  
-        contributions = L_w.unsqueeze(2) * right_env.unsqueeze(1)
+        contributions = L_w.unsqueeze(2) * R_w.unsqueeze(1)
  
         flat_idx = v_k * physical_dim + v_k1
         term2_flat = torch.zeros(physical_dim * physical_dim, D_l, D_r,
@@ -208,6 +221,7 @@ class DMRGTrainer:
             train_data = train_data.long()
 
         self.mps.left_canonicalize()
+        self.mps.right_canonicalize()
 
         lr = cfg.lr
         best_nll = float('inf')
@@ -227,20 +241,14 @@ class DMRGTrainer:
                 if len(idx) < 2:
                     continue
                 batch = train_data[idx]
-                left_env = self._build_left_envs(batch)
-                right_env = self._build_right_envs(batch)
-                self._sweep(batch, "left", lr, left_env, right_env)
- 
-            perm = torch.randperm(len(train_data), device=device)
-            for b in range(n_batches):
-                start = (b * cfg.batch_size) % len(train_data)
-                idx = perm[start:start + cfg.batch_size]
-                if len(idx) < 2:
-                    continue
-                batch = train_data[idx]
+
                 left_env = self._build_left_envs(batch)
                 right_env = self._build_right_envs(batch)
                 self._sweep(batch, "right", lr, left_env, right_env)
+
+                left_env = self._build_left_envs(batch)
+                right_env = self._build_right_envs(batch)
+                self._sweep(batch, "left", lr, left_env, right_env)
  
             train_nll = self._evaluate_nll(train_data)
  

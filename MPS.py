@@ -15,7 +15,6 @@ class MPS(nn.Module):
             bond_dim: int,
             physical_dim: int = 2,
             dtype: torch.dtype = torch.float32,
-            device: Optional[torch.device] = None,
             init_std: Optional[float] = None,
     ):
         super().__init__()
@@ -35,7 +34,6 @@ class MPS(nn.Module):
         self.bond_dim = bond_dim
         self.physical_dim = physical_dim
         self.dtype = dtype
-        self.device = device
 
         self.site_tensors = self._normal_init(init_std)
 
@@ -48,12 +46,12 @@ class MPS(nn.Module):
         """
         if self.dtype in (torch.complex64, torch.complex128):
             base_dtype = torch.float64 if self.dtype == torch.complex128 else torch.float32
-            real_part = torch.randn(*shape, dtype=base_dtype, device=self.device)
-            imag_part = torch.randn(*shape, dtype=base_dtype, device=self.device)
+            real_part = torch.randn(*shape, dtype=base_dtype)
+            imag_part = torch.randn(*shape, dtype=base_dtype)
             complex_tensor = (real_part + 1j * imag_part) / math.sqrt(2)
             return complex_tensor.to(self.dtype)
         else:
-            return torch.randn(*shape, dtype=self.dtype, device=self.device)
+            return torch.randn(*shape, dtype=self.dtype)
 
     def _normal_init(self, init_std: Optional[float] = None) -> nn.ParameterList:
         if init_std is None:
@@ -105,18 +103,7 @@ class MPS(nn.Module):
 
         return env.reshape(batch_size)
     
-    def amplitude_squared(self, configurations: torch.Tensor, eps: float = 1e-30) -> torch.Tensor:
-        """
-        Returns |Psi(v)|^2 for each configuration.
-        """
-        psi_values = self.psi(configurations)
-        if psi_values.is_complex():
-            abs_sq = psi_values.real.square() + psi_values.imag.square() 
-        else:
-            abs_sq = psi_values.square()
-        return abs_sq.clamp_min(eps)
-    
-    def log_amplitude_squared(self, configurations: torch.Tensor, eps: float = 1e-30) -> torch.Tensor:
+    def log_amplitude_squared(self, configurations: torch.Tensor) -> torch.Tensor:
         """
         Numerically stable log |Psi(v)|^2 with per-site rescaling.
         """
@@ -133,7 +120,7 @@ class MPS(nn.Module):
  
         log_scale = torch.zeros(batch_size, dtype=torch.float64, device=device)
  
-        env_abs_max = env.abs().amax(dim=1).clamp_min(eps)
+        env_abs_max = env.abs().amax(dim=1).clamp_min(1e-30)
         env = env / env_abs_max.unsqueeze(1).to(env.dtype)
         log_scale = log_scale + env_abs_max.double().log()
  
@@ -143,15 +130,15 @@ class MPS(nn.Module):
             selected_matrices = tensor[:, values, :].permute(1, 0, 2)
             env = torch.bmm(env.unsqueeze(1), selected_matrices).squeeze(1)
  
-            env_abs_max = env.abs().amax(dim=1).clamp_min(eps)
+            env_abs_max = env.abs().amax(dim=1).clamp_min(1e-30)
             env = env / env_abs_max.unsqueeze(1).to(env.dtype)
             log_scale = log_scale + env_abs_max.double().log()
  
         psi_rescaled = env.squeeze(1)
         if psi_rescaled.is_complex():
-            abs2 = (psi_rescaled.real.square() + psi_rescaled.imag.square()).clamp_min(eps)
+            abs2 = (psi_rescaled.real.square() + psi_rescaled.imag.square()).clamp_min(1e-300)
         else:
-            abs2 = psi_rescaled.square().clamp_min(eps)
+            abs2 = psi_rescaled.square().clamp_min(1e-300)
  
         log_abs2 = abs2.double().log() + 2.0 * log_scale
  
@@ -187,22 +174,16 @@ class MPS(nn.Module):
             else torch.float64
         )
         return (z_value.real.clamp_min(1e-30).double().log() + log_scale).to(real_dtype)
-    
-    def norm(self) -> torch.Tensor:
-        """
-        Returns Z = <psi|psi>.
-        """
-        return self.log_norm().exp()
 
-    def log_prob(self, configurations: torch.Tensor, eps: float = 1e-30) -> torch.Tensor:
+    def log_prob(self, configurations: torch.Tensor) -> torch.Tensor:
         """
         Computes log P(v) = log |Psi(v)|^2 - log Z
         """
-        log_abs_sq = self.log_amplitude_squared(configurations, eps=eps)
+        log_abs_sq = self.log_amplitude_squared(configurations)
         log_z = self.log_norm()
         return log_abs_sq - log_z
 
-    def nll(self, configurations: torch.Tensor, reduction: str = "mean", eps: float = 1e-30) -> torch.Tensor:
+    def nll(self, configurations: torch.Tensor, reduction: str = "mean") -> torch.Tensor:
         """
         Negative log-likelihood:
             NLL(v) = -log P(v)
@@ -212,7 +193,7 @@ class MPS(nn.Module):
           - "mean": scalar
           - "sum" : scalar
         """
-        nll_values = -self.log_prob(configurations, eps=eps)
+        nll_values = -self.log_prob(configurations)
 
         if reduction == "none":
             return nll_values

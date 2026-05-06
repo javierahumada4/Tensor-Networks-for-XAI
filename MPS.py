@@ -721,6 +721,74 @@ class MPS(nn.Module):
         return S_i + S_j - S_ij
     
     @torch.no_grad()
+    def mutual_information_matrix(self) -> torch.Tensor:
+        """
+        Full N×N mutual-information matrix in one pass.
+ 
+        Builds the left and right transfer environments only once (cost
+        O(N · D^3)) and then computes every two-site entropy by reusing
+        them.  For arbitrary feature pairs the inner cost is dominated by
+        propagating the open two-site tensor M through the intermediate
+        sites, O((j-i) · D^3).  Total cost ~ O(N^2 · D^3 + N^3 · D^3),
+        much faster than calling `mutual_information(i, j)` N(N-1)/2
+        times (which would rebuild the envs every call).
+ 
+        Returns a real (N, N) tensor.  Diagonal entries are filled with
+        the single-site von Neumann entropy S(ρ_k).
+        """
+        N = self.num_sites
+        d = self.physical_dim
+ 
+        left = self._left_transfer_envs()
+        right = self._right_transfer_envs()
+ 
+        single_S = torch.zeros(N, dtype=torch.float64)
+        for k in range(N):
+            rdm = self._open_site_rdm(left[k], self.site_tensors[k].data, right[k])
+            tr = rdm.diagonal().real.sum().clamp_min(1e-30)
+            rdm = rdm / tr
+            eigs = torch.linalg.eigvalsh(rdm.real).clamp_min(1e-30)
+            single_S[k] = -(eigs * eigs.log()).sum().item()
+ 
+        out = torch.zeros(N, N, dtype=torch.float64)
+        for i in range(N):
+            out[i, i] = single_S[i]
+ 
+        for i in range(N):
+            A_i = self.site_tensors[i].data
+            M = self._open_two_sites_M(left[i], A_i)
+ 
+            for j in range(i + 1, N):
+                if j > i + 1:
+                    M = self._propagate_M(M, self.site_tensors[j - 1].data)
+ 
+                A_j = self.site_tensors[j].data
+                R = right[j]
+                matrices_j = A_j.permute(1, 0, 2)
+                conj_j = matrices_j.conj()
+                AjR = torch.matmul(matrices_j, R)
+ 
+                rdm = torch.zeros(d, d, d, d, dtype=M.dtype, device=M.device)
+                for ti in range(d):
+                    for tj in range(d):
+                        temp = torch.matmul(M[:, ti], conj_j[tj])
+                        rdm[:, :, ti, tj] = torch.matmul(
+                            temp.reshape(d, -1), AjR.reshape(d, -1).T
+                        )
+                trace = sum(rdm[s, t, s, t] for s in range(d) for t in range(d)).real.clamp_min(1e-30)
+                rdm = rdm / trace
+ 
+                rho_matrix = rdm.reshape(d * d, d * d)
+                eigs = torch.linalg.eigvalsh(rho_matrix.real).clamp_min(1e-30)
+                S_ij = -(eigs * eigs.log()).sum().item()
+ 
+                mi_ij = single_S[i].item() + single_S[j].item() - S_ij
+                out[i, j] = mi_ij
+                out[j, i] = mi_ij
+ 
+        return out
+    
+    @torch.no_grad()
     def sample(self, num_samples: int = 1) -> torch.Tensor:
         """
         Draw exact, independent samples from P(v) = |Ψ(v)|² / Z.

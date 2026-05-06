@@ -8,7 +8,6 @@ import torch.nn as nn
 class DMRGConfig:
     """Hyperparameters for DMRG training."""
     num_descent_steps: int = 1
-    safe_threshold: float = 1e6
     max_bond_dim: int = 100
     svd_cutoff: float = 1e-8
     lr: float = 0.01
@@ -20,7 +19,6 @@ class DMRGConfig:
     adaptive_lr: bool = True
     plateau_factor: float = 10.0
     plateau_threshold: float = 1e-4
-    lr_cap: float = 1.0
     batches_per_loop: int = 0 
 
 
@@ -172,17 +170,12 @@ class DMRGTrainer:
                 grad = self._compute_gradient(k, theta, left_env, right_env, configurations)
                 grad_norm = grad.norm().item()
 
-                if grad_norm > cfg.safe_threshold:
-                    grad = grad * (cfg.safe_threshold / grad_norm)
-                    grad_norm = cfg.safe_threshold
-
                 bond_lr = lr
                 if cfg.adaptive_lr:
                     theta_norm = theta.norm().item()
                     relative_grad = grad_norm / max(theta_norm, 1e-30)
                     if relative_grad < cfg.plateau_threshold:
                         bond_lr = lr * cfg.plateau_factor
-                bond_lr = min(bond_lr, cfg.lr_cap)
 
                 theta = theta - bond_lr * grad
 
@@ -293,7 +286,6 @@ def dmrg_train(
     adaptive_lr: bool = True,
     plateau_factor: float = 10.0,
     plateau_threshold: float = 1e-4,
-    lr_cap: float = 1.0,
     batches_per_loop: int = 0,
 ) -> List[Dict]:
     """
@@ -319,7 +311,6 @@ def dmrg_train(
         adaptive_lr=adaptive_lr,
         plateau_factor=plateau_factor,
         plateau_threshold=plateau_threshold,
-        lr_cap=lr_cap,
         batches_per_loop=batches_per_loop,
     )
     return DMRGTrainer(mps, config).train(train_data, val_data)

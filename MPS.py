@@ -116,6 +116,51 @@ class MPS(nn.Module):
             abs_sq = psi_values.square()
         return abs_sq.clamp_min(eps)
     
+    def log_amplitude_squared(self, configurations: torch.Tensor) -> torch.Tensor:
+        """
+        Numerically stable log |Psi(v)|^2 with per-site rescaling.
+        """
+        if configurations.dtype != torch.long:
+            configurations = configurations.long()
+        batch_size, num_sites = configurations.shape
+        assert num_sites == self.num_sites
+ 
+        device = configurations.device
+ 
+        tensor = self.site_tensors[0]
+        values = configurations[:, 0]
+        env = tensor[:, values, :].permute(1, 0, 2).squeeze(1)
+ 
+        log_scale = torch.zeros(batch_size, dtype=torch.float64, device=device)
+ 
+        env_abs_max = env.abs().amax(dim=1).clamp_min(1e-30)
+        env = env / env_abs_max.unsqueeze(1).to(env.dtype)
+        log_scale = log_scale + env_abs_max.double().log()
+ 
+        for site in range(1, num_sites):
+            tensor = self.site_tensors[site]
+            values = configurations[:, site]
+            selected_matrices = tensor[:, values, :].permute(1, 0, 2)
+            env = torch.bmm(env.unsqueeze(1), selected_matrices).squeeze(1)
+ 
+            env_abs_max = env.abs().amax(dim=1).clamp_min(1e-30)
+            env = env / env_abs_max.unsqueeze(1).to(env.dtype)
+            log_scale = log_scale + env_abs_max.double().log()
+ 
+        psi_rescaled = env.squeeze(1)
+        if psi_rescaled.is_complex():
+            abs2 = (psi_rescaled.real.square() + psi_rescaled.imag.square()).clamp_min(1e-300)
+        else:
+            abs2 = psi_rescaled.square().clamp_min(1e-300)
+ 
+        log_abs2 = abs2.double().log() + 2.0 * log_scale
+ 
+        real_dtype = (
+            torch.float32 if self.dtype in (torch.float32, torch.complex64)
+            else torch.float64
+        )
+        return log_abs2.to(real_dtype)
+    
     def log_norm(self) -> torch.Tensor:
         """ 
         Computes log Z = log <psi|psi>.
@@ -153,8 +198,7 @@ class MPS(nn.Module):
         """
         Computes log P(v) = log |Psi(v)|^2 - log Z
         """
-        abs_sq = self.amplitude_squared(configurations, eps=eps)
-        log_abs_sq = torch.log(abs_sq)
+        log_abs_sq = self.log_amplitude_squared(configurations, eps=eps)
         log_z = self.log_norm()
         return log_abs_sq - log_z
 

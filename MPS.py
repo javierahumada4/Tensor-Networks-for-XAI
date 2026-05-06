@@ -37,8 +37,6 @@ class MPS(nn.Module):
 
         self.site_tensors = self._normal_init(init_std)
 
-        self._is_canonical = False
-
     def _randn(self, *shape):
         """
         Generates real or complex Gaussian tensors depending on dtype.
@@ -247,14 +245,6 @@ class MPS(nn.Module):
                 previous_tensor.reshape(D_l2 * d_p, D_l) @ Rdag
             ).reshape(D_l2, d_p, new_D)
 
-    @torch.no_grad()
-    def mixed_canonicalize(self, center: int) -> None:
-        assert 0 <= center < self.num_sites
-        self.left_canonicalize(up_to=center)
-        self.right_canonicalize(from_site=center + 1)
-        self._center = center
-        self._is_canonical = True
-
     def _truncation_rank(
         self,
         S: torch.Tensor,
@@ -343,17 +333,6 @@ class MPS(nn.Module):
 
         singular_values.reverse()
         return singular_values
-
-    def log_norm_from_center(self) -> torch.Tensor:
-        """
-        """
-        assert self._is_canonical and hasattr(self, "_center"), (
-            "Call mixed_canonicalize(k) before using log_norm_from_center()"
-        )
-
-        Gamma = self.site_tensors[self._center]
-        sq_norm = (Gamma.conj() * Gamma).real.sum()
-        return torch.log(sq_norm.clamp_min(1e-30))
     
     def merge_sites(self, k: int) -> torch.Tensor:
         """

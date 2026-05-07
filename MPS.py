@@ -8,6 +8,7 @@ class MPS(nn.Module):
     """
     Matrix Product State with open boundary
     """
+    _LOG_FLOOR: float = 1e-300
 
     def __init__(
             self,
@@ -128,6 +129,13 @@ class MPS(nn.Module):
             n *= 2
         return n
     
+    @property
+    def _numerical_floor(self) -> float:
+        """Smallest denominator allowed before clamping, dtype-dependent."""
+        if self.dtype in (torch.float32, torch.complex64):
+            return 1e-15
+        return 1e-30
+    
     # ----------------------------------------------------------------------
     # Amplitudes, norms, probabilities
     # ----------------------------------------------------------------------
@@ -171,7 +179,7 @@ class MPS(nn.Module):
  
         log_scale = torch.zeros(batch_size, dtype=torch.float64, device=device)
  
-        env_abs_max = env.abs().amax(dim=1).clamp_min(1e-30)
+        env_abs_max = env.abs().amax(dim=1).clamp_min(self._numerical_floor)
         env = env / env_abs_max.unsqueeze(1).to(env.dtype)
         log_scale = log_scale + env_abs_max.double().log()
  
@@ -181,15 +189,15 @@ class MPS(nn.Module):
             selected_matrices = tensor[:, values, :].permute(1, 0, 2)
             env = torch.bmm(env.unsqueeze(1), selected_matrices).squeeze(1)
  
-            env_abs_max = env.abs().amax(dim=1).clamp_min(1e-30)
+            env_abs_max = env.abs().amax(dim=1).clamp_min(self._numerical_floor)
             env = env / env_abs_max.unsqueeze(1).to(env.dtype)
             log_scale = log_scale + env_abs_max.double().log()
  
         psi_rescaled = env.squeeze(1)
         if psi_rescaled.is_complex():
-            abs2 = (psi_rescaled.real.square() + psi_rescaled.imag.square()).clamp_min(1e-300)
+            abs2 = (psi_rescaled.real.square() + psi_rescaled.imag.square()).clamp_min(self._LOG_FLOOR)
         else:
-            abs2 = psi_rescaled.square().clamp_min(1e-300)
+            abs2 = psi_rescaled.square().clamp_min(self._LOG_FLOOR)
  
         log_abs2 = abs2.double().log() + 2.0 * log_scale
  
@@ -215,7 +223,7 @@ class MPS(nn.Module):
             matrices_dagger = matrices.conj().transpose(1, 2)
             env = torch.matmul(matrices_dagger, contracted).sum(dim=0)
 
-            scale = env.abs().max().clamp_min(1e-30)
+            scale = env.abs().max().clamp_min(self._numerical_floor)
             env   = env / scale
             log_scale = log_scale + scale.double().log()
         
@@ -224,7 +232,7 @@ class MPS(nn.Module):
             torch.float32 if self.dtype in (torch.float32, torch.complex64)
             else torch.float64
         )
-        return (z_value.real.clamp_min(1e-30).double().log() + log_scale).to(real_dtype)
+        return (z_value.real.clamp_min(self._numerical_floor).double().log() + log_scale).to(real_dtype)
 
     def log_prob(self, configurations: torch.Tensor) -> torch.Tensor:
         """
@@ -293,7 +301,7 @@ class MPS(nn.Module):
         """
         n = len(S)
         if cutoff > 0:
-            S_max = S[0].abs().clamp_min(1e-30)
+            S_max = S[0].abs().clamp_min(self._numerical_floor)
             n = max(int((S / S_max >= cutoff).sum().item()), 1)
         if max_bond_dim is not None:
             n = min(n, max_bond_dim)
@@ -590,7 +598,7 @@ class MPS(nn.Module):
  
         rdm = self._open_site_rdm(left[site], self.site_tensors[site].data, right[site])
  
-        tr = rdm.diagonal().real.sum().clamp_min(1e-30)
+        tr = rdm.diagonal().real.sum().clamp_min(self._numerical_floor)
         return rdm / tr
     
     @torch.no_grad()
@@ -603,7 +611,7 @@ class MPS(nn.Module):
         rdms: List[torch.Tensor] = []
         for k in range(self.num_sites):
             rdm = self._open_site_rdm(left[k], self.site_tensors[k].data, right[k])
-            tr = rdm.diagonal().real.sum().clamp_min(1e-30)
+            tr = rdm.diagonal().real.sum().clamp_min(self._numerical_floor)
             rdms.append(rdm / tr)
         return rdms
     
@@ -649,7 +657,7 @@ class MPS(nn.Module):
                 temp = torch.matmul(M[:, ti], conj_j[tj])
                 rdm[:, :, ti, tj] = torch.matmul(temp.reshape(d, -1), AjR.reshape(d, -1).T)
  
-        trace = sum(rdm[s, t, s, t] for s in range(d) for t in range(d)).real.clamp_min(1e-30)
+        trace = sum(rdm[s, t, s, t] for s in range(d) for t in range(d)).real.clamp_min(self._numerical_floor)
         return rdm / trace
     
     @torch.no_grad()
@@ -701,7 +709,7 @@ class MPS(nn.Module):
  
             rdm = self._open_site_rdm(LC, A_higher, R)
  
-        trace = rdm.diagonal().real.sum().clamp_min(1e-30)
+        trace = rdm.diagonal().real.sum().clamp_min(self._numerical_floor)
         return rdm / trace
     
     # ----------------------------------------------------------------------
@@ -744,7 +752,7 @@ class MPS(nn.Module):
         rdms = self.all_single_site_rdms()
         out = torch.zeros(self.num_sites, dtype=torch.float64)
         for k, r in enumerate(rdms):
-            eigs = torch.linalg.eigvalsh(r.real).clamp_min(1e-30)
+            eigs = torch.linalg.eigvalsh(r.real).clamp_min(self._numerical_floor)
             out[k] = -(eigs * eigs.log()).sum().item()
         return out
     
@@ -765,8 +773,8 @@ class MPS(nn.Module):
         entropies: List[float] = []
         for S in svs:
             p = S.square()
-            p = p / p.sum().clamp_min(1e-30)
-            ent = -(p * p.clamp_min(1e-30).log()).sum()
+            p = p / p.sum().clamp_min(self._numerical_floor)
+            ent = -(p * p.clamp_min(self._numerical_floor).log()).sum()
             entropies.append(ent.item())
         return entropies
     
@@ -794,8 +802,8 @@ class MPS(nn.Module):
  
         rdm_i = self.single_site_rdm(lo)
         rdm_j = self.single_site_rdm(hi)
-        eigs_i = torch.linalg.eigvalsh(rdm_i.real).clamp_min(1e-30)
-        eigs_j = torch.linalg.eigvalsh(rdm_j.real).clamp_min(1e-30)
+        eigs_i = torch.linalg.eigvalsh(rdm_i.real).clamp_min(self._numerical_floor)
+        eigs_j = torch.linalg.eigvalsh(rdm_j.real).clamp_min(self._numerical_floor)
         S_i = -(eigs_i * eigs_i.log()).sum().item()
         S_j = -(eigs_j * eigs_j.log()).sum().item()
  
@@ -803,7 +811,7 @@ class MPS(nn.Module):
         d = self.physical_dim
         rho_matrix = rdm_ij.reshape(d * d, d * d)
         eigs = torch.linalg.eigvalsh(rho_matrix.real)
-        eigs = eigs.clamp_min(1e-30)
+        eigs = eigs.clamp_min(self._numerical_floor)
         S_ij = -(eigs * eigs.log()).sum().item()
  
         return S_i + S_j - S_ij
@@ -822,9 +830,9 @@ class MPS(nn.Module):
         single_S = torch.zeros(N, dtype=torch.float64)
         for k in range(N):
             rdm = self._open_site_rdm(left[k], self.site_tensors[k].data, right[k])
-            tr = rdm.diagonal().real.sum().clamp_min(1e-30)
+            tr = rdm.diagonal().real.sum().clamp_min(self._numerical_floor)
             rdm = rdm / tr
-            eigs = torch.linalg.eigvalsh(rdm.real).clamp_min(1e-30)
+            eigs = torch.linalg.eigvalsh(rdm.real).clamp_min(self._numerical_floor)
             single_S[k] = -(eigs * eigs.log()).sum().item()
  
         out = torch.zeros(N, N, dtype=torch.float64)
@@ -852,11 +860,11 @@ class MPS(nn.Module):
                         rdm[:, :, ti, tj] = torch.matmul(
                             temp.reshape(d, -1), AjR.reshape(d, -1).T
                         )
-                trace = sum(rdm[s, t, s, t] for s in range(d) for t in range(d)).real.clamp_min(1e-30)
+                trace = sum(rdm[s, t, s, t] for s in range(d) for t in range(d)).real.clamp_min(self._numerical_floor)
                 rdm = rdm / trace
  
                 rho_matrix = rdm.reshape(d * d, d * d)
-                eigs = torch.linalg.eigvalsh(rho_matrix.real).clamp_min(1e-30)
+                eigs = torch.linalg.eigvalsh(rho_matrix.real).clamp_min(self._numerical_floor)
                 S_ij = -(eigs * eigs.log()).sum().item()
  
                 mi_ij = single_S[i].item() + single_S[j].item() - S_ij
@@ -893,7 +901,7 @@ class MPS(nn.Module):
         else:
             sq_norms = matrices.square()
         probs = sq_norms.sum(dim=1)
-        probs = probs / probs.sum().clamp_min(1e-30)
+        probs = probs / probs.sum().clamp_min(self._numerical_floor)
  
         chosen = torch.multinomial(
             probs.unsqueeze(0).expand(num_samples, -1), 1
@@ -914,7 +922,7 @@ class MPS(nn.Module):
             else:
                 sq = candidates.square()
             cond_probs = sq.sum(dim=2)
-            cond_probs = cond_probs / cond_probs.sum(dim=1, keepdim=True).clamp_min(1e-30)
+            cond_probs = cond_probs / cond_probs.sum(dim=1, keepdim=True).clamp_min(self._numerical_floor)
  
             chosen = torch.multinomial(cond_probs, 1).squeeze(1)
             samples[:, k] = chosen
@@ -1019,7 +1027,7 @@ class MPS(nn.Module):
             else:
                 sq_norms = matrices.square()
             probs = sq_norms.sum(dim=1)
-            probs = probs / probs.sum().clamp_min(1e-30)
+            probs = probs / probs.sum().clamp_min(self._numerical_floor)
             chosen = torch.multinomial(
                 probs.unsqueeze(0).expand(num_samples, -1), 1
             ).squeeze(1)
@@ -1041,7 +1049,7 @@ class MPS(nn.Module):
                 else:
                     sq = candidates.square()
                 cond_probs = sq.sum(dim=2)
-                cond_probs = cond_probs / cond_probs.sum(dim=1, keepdim=True).clamp_min(1e-30)
+                cond_probs = cond_probs / cond_probs.sum(dim=1, keepdim=True).clamp_min(self._numerical_floor)
                 chosen = torch.multinomial(cond_probs, 1).squeeze(1)
  
             samples[:, k] = chosen
@@ -1079,7 +1087,7 @@ class MPS(nn.Module):
             else:
                 sq_norms = matrices.square()
             probs = sq_norms.sum(dim=1)
-            probs = probs / probs.sum().clamp_min(1e-30)
+            probs = probs / probs.sum().clamp_min(self._numerical_floor)
             chosen = torch.multinomial(
                 probs.unsqueeze(0).expand(num_samples, -1), 1
             ).squeeze(1)
@@ -1101,7 +1109,7 @@ class MPS(nn.Module):
                 else:
                     sq = candidates.square()
                 cond_probs = sq.sum(dim=2)
-                cond_probs = cond_probs / cond_probs.sum(dim=1, keepdim=True).clamp_min(1e-30)
+                cond_probs = cond_probs / cond_probs.sum(dim=1, keepdim=True).clamp_min(self._numerical_floor)
                 chosen = torch.multinomial(cond_probs, 1).squeeze(1)
  
             samples[:, k] = chosen

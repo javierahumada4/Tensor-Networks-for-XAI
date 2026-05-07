@@ -185,7 +185,7 @@ class MPS(nn.Module):
             physical_dim=config["physical_dim"],
             dtype=config["dtype"],
         )
-        
+
         model.site_tensors = nn.ParameterList(
             [nn.Parameter(t.to(config["dtype"])) for t in tensors]
         )
@@ -317,15 +317,24 @@ class MPS(nn.Module):
         )
         return (z_value.real.clamp_min(self._numerical_floor).double().log() + log_scale).to(real_dtype)
 
-    def log_prob(self, configurations: torch.Tensor) -> torch.Tensor:
+    def log_prob(self, configurations: torch.Tensor, batch_size: Optional[int] = None) -> torch.Tensor:
         """
         Computes log P(v) = log |Psi(v)|^2 - log Z
         """
-        log_abs_sq = self.log_amplitude_squared(configurations)
+        if batch_size is not None and batch_size < 1:
+            raise ValueError(f"batch_size must be >= 1 or None, got {batch_size}")
+ 
         log_z = self.log_norm()
-        return log_abs_sq - log_z
+        if batch_size is None or len(configurations) <= batch_size:
+            return self.log_amplitude_squared(configurations) - log_z
+ 
+        chunks: List[torch.Tensor] = []
+        for start in range(0, len(configurations), batch_size):
+            end = start + batch_size
+            chunks.append(self.log_amplitude_squared(configurations[start:end]))
+        return torch.cat(chunks) - log_z
 
-    def nll(self, configurations: torch.Tensor, reduction: str = "mean") -> torch.Tensor:
+    def nll(self, configurations: torch.Tensor, reduction: str = "mean", batch_size: Optional[int] = None,) -> torch.Tensor:
         """
         Negative log-likelihood:
             NLL(v) = -log P(v)
@@ -335,7 +344,7 @@ class MPS(nn.Module):
           - "mean": scalar
           - "sum" : scalar
         """
-        nll_values = -self.log_prob(configurations)
+        nll_values = -self.log_prob(configurations, batch_size=batch_size)
 
         if reduction == "none":
             return nll_values

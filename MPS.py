@@ -108,6 +108,89 @@ class MPS(nn.Module):
             raise ValueError(f"max_bond_dim must be >= 1 or None, got {max_bond_dim}")
         if cutoff < 0:
             raise ValueError(f"cutoff must be >= 0, got {cutoff}")
+        
+    def to(self, *args, **kwargs):
+        """
+        Move and/or cast the MPS, respecting the configured dtype.
+        """
+        new_dtype: Optional[torch.dtype] = kwargs.pop("dtype", None)
+        new_device = kwargs.pop("device", None)
+        positional: List = []
+        for a in args:
+            if isinstance(a, torch.dtype):
+                if new_dtype is None:
+                    new_dtype = a
+            elif isinstance(a, (torch.device, str)):
+                if new_device is None:
+                    new_device = a
+            else:
+                positional.append(a)
+ 
+        if new_dtype is not None:
+            self_is_complex = self.dtype in (torch.complex64, torch.complex128)
+            new_is_complex = new_dtype in (torch.complex64, torch.complex128)
+            if self_is_complex != new_is_complex:
+                new_dtype = None
+            else:
+                self.dtype = new_dtype
+ 
+        rebuilt_kwargs = dict(kwargs)
+        if new_dtype is not None:
+            rebuilt_kwargs["dtype"] = new_dtype
+        if new_device is not None:
+            rebuilt_kwargs["device"] = new_device
+        return super().to(*positional, **rebuilt_kwargs)
+    
+    def save(self, path: str) -> None:
+        """
+        Serialise the full MPS (config + site tensors) to disk.
+        """
+        torch.save(
+            {
+                "format_version": 1,
+                "config": {
+                    "num_sites": self.num_sites,
+                    "bond_dim": self.bond_dim,
+                    "physical_dim": self.physical_dim,
+                    "dtype": self.dtype,
+                },
+                "tensors": [t.detach().cpu().clone() for t in self.site_tensors],
+            },
+            path,
+        )
+ 
+    @classmethod
+    def load(cls, path: str, map_location: Optional[str] = None) -> "MPS":
+        """
+        Reconstruct an MPS previously saved with :meth:`save`.
+        """
+        ckpt = torch.load(path, map_location=map_location, weights_only=False)
+        if "format_version" not in ckpt or ckpt["format_version"] != 1:
+            raise ValueError(
+                f"Unrecognised checkpoint format at {path!r}; "
+                "expected format_version=1."
+            )
+        config = ckpt["config"]
+        tensors: List[torch.Tensor] = ckpt["tensors"]
+ 
+        if len(tensors) != config["num_sites"]:
+            raise ValueError(
+                f"Checkpoint has {len(tensors)} tensors but config "
+                f"declares num_sites={config['num_sites']}"
+            )
+ 
+        model = cls(
+            num_sites=config["num_sites"],
+            bond_dim=config["bond_dim"],
+            physical_dim=config["physical_dim"],
+            dtype=config["dtype"],
+        )
+        
+        model.site_tensors = nn.ParameterList(
+            [nn.Parameter(t.to(config["dtype"])) for t in tensors]
+        )
+        return model
+ 
     
     # ----------------------------------------------------------------------
     # Properties

@@ -113,12 +113,6 @@ class MPS(nn.Module):
     # ----------------------------------------------------------------------
     
     @property
-    def _numerical_floor(self) -> float:
-        if self.dtype in (torch.float32, torch.complex64):
-            return 1e-15
-        return 1e-30
-    
-    @property
     def bond_dims(self) -> List[int]:
         return [self.site_tensors[k].shape[2] for k in range(self.num_sites - 1)]
     
@@ -422,6 +416,7 @@ class MPS(nn.Module):
         singular_values.reverse()
         return singular_values
     
+    @torch.no_grad()
     def merge_sites(self, k: int) -> torch.Tensor:
         """
         """
@@ -487,22 +482,25 @@ class MPS(nn.Module):
         return S.detach().clone() 
     
     # ----------------------------------------------------------------------
-    # Reduced density matrices: private kernels
+    # Transfer environments and RDM kernels
     # ----------------------------------------------------------------------
     
+    @torch.no_grad()
     def _apply_transfer_left(self, L: torch.Tensor, A: torch.Tensor) -> torch.Tensor:
         matrices = A.permute(1, 0, 2)
         L_times_conj = torch.matmul(L, matrices.conj())
         per_s = torch.matmul(matrices.transpose(1, 2), L_times_conj)
         return per_s.sum(dim = 0)
     
+    @torch.no_grad()
     def _apply_transfer_right(self, R: torch.Tensor, A: torch.Tensor) -> torch.Tensor:
         matrices = A.permute(1, 0, 2)
         M_times_R = torch.matmul(matrices, R)
         per_s = torch.matmul(M_times_R, matrices.conj().transpose(1, 2))
         return per_s.sum(dim = 0)
     
-    def _left_transfer_envs(self) -> List[torch.Tensor]:
+    @torch.no_grad()
+    def transfer_environments_left(self) -> List[torch.Tensor]:
         """
         Build left transfer matrices for every bond
         """
@@ -512,7 +510,8 @@ class MPS(nn.Module):
             envs.append(self._apply_transfer_left(envs[k], self.site_tensors[k].data))
         return envs
     
-    def _right_transfer_envs(self) -> List[torch.Tensor]:
+    @torch.no_grad()
+    def transfer_environments_right(self) -> List[torch.Tensor]:
         """
         Build right transfer matrices for every bond.
         """
@@ -524,6 +523,7 @@ class MPS(nn.Module):
             envs[k - 1] = self._apply_transfer_right(envs[k], self.site_tensors[k].data)
         return envs
     
+    @torch.no_grad()
     def _open_site_rdm(self, L: torch.Tensor, A: torch.Tensor, R: torch.Tensor) -> torch.Tensor:
         """
         Single-site RDM kernel (un-normalised).
@@ -537,6 +537,7 @@ class MPS(nn.Module):
 
         return torch.matmul(temp_flat, conj_flat.T)
     
+    @torch.no_grad()
     def _open_two_sites_M(self, L: torch.Tensor, A: torch.Tensor) -> torch.Tensor:
         """
         First step of two-site RDM: leave one physical index pair open.
@@ -546,6 +547,7 @@ class MPS(nn.Module):
         LA = torch.matmul(L.conj().T, matrices)
         return torch.matmul(LA.permute(0, 2, 1).unsqueeze(1), conj.unsqueeze(0))
     
+    @torch.no_grad()
     def _propagate_M(self, M: torch.Tensor, A: torch.Tensor) -> torch.Tensor:
         """
         Propagate the open two-index tensor M through an intermediate site
@@ -583,8 +585,8 @@ class MPS(nn.Module):
         """
         self._validate_site(site)
         
-        left = self._left_transfer_envs()
-        right = self._right_transfer_envs()
+        left = self.transfer_environments_left()
+        right = self.transfer_environments_right()
  
         rdm = self._open_site_rdm(left[site], self.site_tensors[site].data, right[site])
  
@@ -596,8 +598,8 @@ class MPS(nn.Module):
         """
         Single-site RDMs for every site.
         """
-        left = self._left_transfer_envs()
-        right = self._right_transfer_envs()
+        left = self.transfer_environments_left()
+        right = self.transfer_environments_right()
         rdms: List[torch.Tensor] = []
         for k in range(self.num_sites):
             rdm = self._open_site_rdm(left[k], self.site_tensors[k].data, right[k])
@@ -624,8 +626,8 @@ class MPS(nn.Module):
         
         d = self.physical_dim
  
-        left = self._left_transfer_envs()
-        right = self._right_transfer_envs()
+        left = self.transfer_environments_left()
+        right = self.transfer_environments_right()
  
         L = left[site_i]
         R = right[site_j]
@@ -673,8 +675,8 @@ class MPS(nn.Module):
  
         lower, higher = min(site_i, site_j), max(site_i, site_j)
  
-        left = self._left_transfer_envs()
-        right = self._right_transfer_envs()
+        left = self.transfer_environments_left()
+        right = self.transfer_environments_right()
  
         L = left[lower]
         R = right[higher]
@@ -814,8 +816,8 @@ class MPS(nn.Module):
         N = self.num_sites
         d = self.physical_dim
  
-        left = self._left_transfer_envs()
-        right = self._right_transfer_envs()
+        left = self.transfer_environments_left()
+        right = self.transfer_environments_right()
  
         single_S = torch.zeros(N, dtype=torch.float64)
         for k in range(N):
@@ -879,7 +881,6 @@ class MPS(nn.Module):
  
         device = self.site_tensors[0].device
         N = self.num_sites
-        d = self.physical_dim
         is_complex = self.dtype in (torch.complex64, torch.complex128)
  
         samples = torch.zeros(num_samples, N, dtype=torch.long, device=device)

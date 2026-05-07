@@ -1076,20 +1076,12 @@ class MPS(nn.Module):
         if free_pos.numel() == 0:
             return known.long().unsqueeze(0).expand(num_samples, N).clone()
  
-        # Detect end-block structure
         if fixed_pos.min().item() > free_pos.max().item():
-            # fixed bits form a suffix → R→L sweep with left-canonical MPS
             return self._sample_conditional_RL(known, mask, num_samples)
         if fixed_pos.max().item() < free_pos.min().item():
-            # fixed bits form a prefix → L→R sweep with right-canonical MPS
             return self._sample_conditional_LR(known, mask, num_samples)
  
-        raise NotImplementedError(
-            "sample_conditional currently supports only masks where all "
-            "fixed sites form a contiguous block at one end of the chain. "
-            "For scattered masks a ladder-shaped contraction is required "
-            "(see Han et al. 2018, Sec. II.C)."
-        )
+        return self._sample_conditional_scattered(known, mask, num_samples)
  
     @torch.no_grad()
     def _sample_conditional_RL(
@@ -1206,6 +1198,71 @@ class MPS(nn.Module):
  
             samples[:, k] = chosen
             idx = chosen.unsqueeze(1).unsqueeze(2).expand(num_samples, 1, candidates.shape[2])
+            x = candidates.gather(1, idx).squeeze(1)
+ 
+        return samples
+    
+    @torch.no_grad()
+    def _sample_conditional_scattered(
+        self,
+        known: torch.Tensor,
+        mask: torch.Tensor,
+        num_samples: int,
+    ) -> torch.Tensor:
+        """
+        Conditional sampling for scattered masks via ladder contraction.
+        """
+        device = self.site_tensors[0].device
+        N = self.num_sites
+        is_complex = self.dtype in (torch.complex64, torch.complex128)
+
+        right_masked: List[Optional[torch.Tensor]] = [None] * N
+        right_masked[N - 1] = torch.ones(1, 1, dtype=self.dtype, device=device)
+ 
+        for k in range(N - 1, 0, -1):
+            A_k = self.site_tensors[k].data
+            mats = A_k.permute(1, 0, 2)
+            R_next = right_masked[k]
+ 
+            if mask[k]:
+                v = int(known[k].item())
+                A_v = mats[v]
+                right_masked[k - 1] = A_v @ R_next @ A_v.conj().T
+            else:
+                AR = torch.matmul(mats, R_next)
+                right_masked[k - 1] = torch.matmul(
+                    AR, mats.conj().transpose(1, 2)
+                ).sum(dim=0)
+ 
+        samples = torch.zeros(num_samples, N, dtype=torch.long, device=device)
+ 
+        x = torch.ones(num_samples, 1, dtype=self.dtype, device=device)
+ 
+        for k in range(N):
+            A_k = self.site_tensors[k].data
+            mats = A_k.permute(1, 0, 2)
+            R_next = right_masked[k]
+ 
+            candidates = torch.einsum('sa,vab->svb', x, mats)
+ 
+            if mask[k]:
+                v = int(known[k].item())
+                chosen = torch.full(
+                    (num_samples,), v, dtype=torch.long, device=device,
+                )
+            else:
+                t = torch.einsum('svb,bc->svc', candidates, R_next)
+                w = (t * candidates.conj()).sum(dim=2)
+                if is_complex:
+                    w = w.real
+                w = w.clamp_min(self._numerical_floor)
+                w = w / w.sum(dim=1, keepdim=True).clamp_min(self._numerical_floor)
+                chosen = torch.multinomial(w, 1).squeeze(1)
+ 
+            samples[:, k] = chosen
+            idx = chosen.unsqueeze(1).unsqueeze(2).expand(
+                num_samples, 1, candidates.shape[2]
+            )
             x = candidates.gather(1, idx).squeeze(1)
  
         return samples

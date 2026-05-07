@@ -16,7 +16,7 @@ class MPS(nn.Module):
             physical_dim: int = 2,
             dtype: torch.dtype = torch.float32,
             init_std: Optional[float] = None,
-    ):
+    ) -> None:
         super().__init__()
 
         if num_sites < 2:
@@ -37,7 +37,7 @@ class MPS(nn.Module):
 
         self.site_tensors = self._normal_init(init_std)
 
-    def _randn(self, *shape):
+    def _randn(self, *shape) -> torch.Tensor:
         """
         Generates real or complex Gaussian tensors depending on dtype.
         Ensures E[|z|^2] = 1 for complex tensors.
@@ -69,9 +69,54 @@ class MPS(nn.Module):
 
         return nn.ParameterList(tensor_list)
     
+    # ------------------------------------------------------------------
+    #  Input validation helpers
+    # ------------------------------------------------------------------
+
+    def _validate_site(self, site: int, name: str = "site") -> None:
+        """Check that ``site`` is a valid site index."""
+        if not (0 <= site < self.num_sites):
+            raise ValueError(f"{name}={site} out of range [0, {self.num_sites})")
+
+    def _validate_configurations(self, configurations: torch.Tensor) -> None:
+        """Check shape and value range of a configurations tensor."""
+        if configurations.dim() != 2:
+            raise ValueError(
+                "configurations must be 2D with shape (batch_size, num_sites), "
+                f"got shape {tuple(configurations.shape)}"
+            )
+        if configurations.shape[1] != self.num_sites:
+            raise ValueError(
+                f"Expected {self.num_sites} sites, got {configurations.shape[1]}"
+            )
+        if configurations.numel() == 0:
+            return
+        lo = configurations.min().item()
+        hi = configurations.max().item()
+        if lo < 0 or hi >= self.physical_dim:
+            raise ValueError(
+                f"configurations values must be in [0, {self.physical_dim}), "
+                f"got range [{lo}, {hi}]"
+            )
+
+    def _validate_truncation(
+        self, max_bond_dim: Optional[int], cutoff: float
+    ) -> None:
+        """Check SVD truncation hyperparameters."""
+        if max_bond_dim is not None and max_bond_dim < 1:
+            raise ValueError(f"max_bond_dim must be >= 1 or None, got {max_bond_dim}")
+        if cutoff < 0:
+            raise ValueError(f"cutoff must be >= 0, got {cutoff}")
+    
     # ----------------------------------------------------------------------
     # Properties
     # ----------------------------------------------------------------------
+    
+    @property
+    def _numerical_floor(self) -> float:
+        if self.dtype in (torch.float32, torch.complex64):
+            return 1e-15
+        return 1e-30
     
     @property
     def bond_dims(self) -> List[int]:
@@ -99,15 +144,14 @@ class MPS(nn.Module):
         """
         if configurations.dtype != torch.long:
             configurations = configurations.long()
-        batch_size, num_sites = configurations.shape
-        if num_sites != self.num_sites:
-            raise ValueError(f"Expected {self.num_sites} sites, got {num_sites}")
+        self._validate_configurations(configurations)
+        batch_size = configurations.shape[0]
         
         tensor = self.site_tensors[0]
         values = configurations[:, 0]
         env = tensor[:, values, :].permute(1, 0, 2)
 
-        for site in range(1, num_sites):
+        for site in range(1, self.num_sites):
             tensor = self.site_tensors[site]
             values = configurations[:, site]
             selected_matrices = tensor[:, values, :].permute(1, 0, 2)
@@ -122,9 +166,8 @@ class MPS(nn.Module):
         """
         if configurations.dtype != torch.long:
             configurations = configurations.long()
-        batch_size, num_sites = configurations.shape
-        if num_sites != self.num_sites:
-            raise ValueError(f"Expected {self.num_sites} sites, got {num_sites}")
+        self._validate_configurations(configurations)
+        batch_size = configurations.shape[0]
  
         device = configurations.device
  
@@ -138,7 +181,7 @@ class MPS(nn.Module):
         env = env / env_abs_max.unsqueeze(1).to(env.dtype)
         log_scale = log_scale + env_abs_max.double().log()
  
-        for site in range(1, num_sites):
+        for site in range(1, self.num_sites):
             tensor = self.site_tensors[site]
             values = configurations[:, site]
             selected_matrices = tensor[:, values, :].permute(1, 0, 2)
@@ -274,6 +317,12 @@ class MPS(nn.Module):
         """
         if up_to is None:
             up_to = self.num_sites - 1
+        if not (0 <= up_to <= self.num_sites - 1):
+            raise ValueError(
+                f"up_to={up_to} out of range [0, {self.num_sites - 1}]"
+            )
+        if truncate:
+            self._validate_truncation(max_bond_dim, cutoff)
  
         if not truncate:
             for site in range(up_to):
@@ -326,6 +375,12 @@ class MPS(nn.Module):
         """
         if from_site is None:
             from_site = 1
+        if not (1 <= from_site <= self.num_sites):
+            raise ValueError(
+                f"from_site={from_site} out of range [1, {self.num_sites}]"
+            )
+        if truncate:
+            self._validate_truncation(max_bond_dim, cutoff)
  
         if not truncate:
             for site in range(self.num_sites - 1, from_site - 1, -1):
@@ -392,20 +447,42 @@ class MPS(nn.Module):
     ) -> torch.Tensor:
         """
         """
+        if not (0 <= k < self.num_sites - 1):
+            raise ValueError(
+                f"Invalid bond index k={k}; expected 0 <= k < {self.num_sites - 1}"
+            )
+        if direction not in ("right", "left"):
+            raise ValueError(
+                f"direction must be 'right' or 'left', got {direction!r}"
+            )
+        if theta.dim() != 4:
+            raise ValueError(
+                f"theta must be rank-4 with shape (D_l, d, d, D_r), got shape {tuple(theta.shape)}"
+            )
         D_l, d1, d2, D_r = theta.shape
-        U, S, Vh = torch.linalg.svd(theta.reshape(D_l * d1, d2 * D_r), full_matrices=False)
+        if d1 != self.physical_dim or d2 != self.physical_dim:
+            raise ValueError(
+                f"theta physical dims must be ({self.physical_dim}, {self.physical_dim}), got ({d1}, {d2})"
+            )
+        expected_D_l = self.site_tensors[k].shape[0]
+        expected_D_r = self.site_tensors[k + 1].shape[2]
+        if D_l != expected_D_l or D_r != expected_D_r:
+            raise ValueError(
+                f"theta bond dims ({D_l}, {D_r}) do not match adjacent sites "
+                f"({expected_D_l}, {expected_D_r})"
+            )
+        self._validate_truncation(max_bond_dim, cutoff)
 
+        U, S, Vh = torch.linalg.svd(theta.reshape(D_l * d1, d2 * D_r), full_matrices=False)
         n = self._truncation_rank(S, max_bond_dim, cutoff)
         U, S, Vh = U[:, :n], S[:n], Vh[:n, :]
 
         if direction == "right":
             self.site_tensors[k].data = U.reshape(D_l, d1, n)
             self.site_tensors[k + 1].data = (S.unsqueeze(1) * Vh).reshape(n, d2, D_r)
-        elif direction == "left":
+        else:  # "left", already validated above
             self.site_tensors[k].data = (U * S.unsqueeze(0)).reshape(D_l, d1, n)
             self.site_tensors[k + 1].data = Vh.reshape(n, d2, D_r)
-        else:
-            raise ValueError(f"direction must be 'right' or 'left', got {direction!r}")
 
         return S.detach().clone() 
     
@@ -504,8 +581,8 @@ class MPS(nn.Module):
         Returns a (d, d) Hermitian matrix normalised to trace 1.
         The diagonal entries give P(v_k = s) for each physical value s.
         """
-        if not (0 <= site < self.num_sites):
-            raise ValueError(f"site={site} out of range [0, {self.num_sites})")
+        self._validate_site(site)
+        
         left = self._left_transfer_envs()
         right = self._right_transfer_envs()
  
@@ -538,11 +615,13 @@ class MPS(nn.Module):
         Returns a (d, d, d, d) tensor with index order [s_i, s_j, t_i, t_j],
         normalised so that  Σ_{s_i, s_j} ρ[s_i, s_j, s_i, s_j] = 1.
         """
-        if not (0 <= site_i < site_j < self.num_sites):
+        self._validate_site(site_i, "site_i")
+        self._validate_site(site_j, "site_j")
+        if site_i >= site_j:
             raise ValueError(
-                f"Invalid (site_i, site_j) = ({site_i}, {site_j}); "
-                f"need 0 <= site_i < site_j < {self.num_sites}"
+                f"Need site_i < site_j, got ({site_i}, {site_j})"
             )
+        
         d = self.physical_dim
  
         left = self._left_transfer_envs()
@@ -583,14 +662,14 @@ class MPS(nn.Module):
  
         Returns a (d, d) matrix.  Diagonal entries give P(v_i | v_j = value_j).
         """
-        if not (0 <= site_i < self.num_sites):
-            raise ValueError(f"site_i={site_i} out of range")
-        if not (0 <= site_j < self.num_sites):
-            raise ValueError(f"site_j={site_j} out of range")
+        self._validate_site(site_i, "site_i")
+        self._validate_site(site_j, "site_j")
         if site_i == site_j:
             raise ValueError("site_i and site_j must differ")
         if not (0 <= value_j < self.physical_dim):
-            raise ValueError(f"value_j={value_j} out of range [0, {self.physical_dim})")
+            raise ValueError(
+                f"value_j={value_j} out of range [0, {self.physical_dim})"
+            )
  
         lower, higher = min(site_i, site_j), max(site_i, site_j)
  
@@ -613,7 +692,7 @@ class MPS(nn.Module):
             rdm = (M * RC).sum(dim=(-2, -1))
         else:
             Fj = A_lower[:, value_j, :]
-            LC = Fj.conj().T @ L @ Fj
+            LC = Fj.T @ L @ Fj.conj()
  
             for m in range(lower + 1, higher):
                 LC = self._apply_transfer_left(LC, self.site_tensors[m].data)
@@ -704,6 +783,8 @@ class MPS(nn.Module):
         features.  Used to build the MI heatmap for feature
         clustering and ordering optimisation.
         """
+        self._validate_site(site_i, "site_i")
+        self._validate_site(site_j, "site_j")
         if site_i == site_j:
             raise ValueError("site_i and site_j must differ")
 
@@ -791,6 +872,9 @@ class MPS(nn.Module):
         """
         Draw exact, independent samples from P(v) = |Ψ(v)|² / Z.
         """
+        if num_samples < 1:
+            raise ValueError(f"num_samples must be >= 1, got {num_samples}")
+        
         self.left_canonicalize()
  
         device = self.site_tensors[0].device
@@ -852,15 +936,36 @@ class MPS(nn.Module):
         Conditional sampling: generate completions for partially known
         configurations.
         """
-        if known.shape[0] != self.num_sites:
-            raise ValueError(f"known has {known.shape[0]} entries, expected {self.num_sites}")
-        if mask.shape[0] != self.num_sites:
-            raise ValueError(f"mask has {mask.shape[0]} entries, expected {self.num_sites}")
+        if num_samples < 1:
+            raise ValueError(f"num_samples must be >= 1, got {num_samples}")
+        if known.dim() != 1 or known.shape[0] != self.num_sites:
+            raise ValueError(
+                f"known must be 1D with {self.num_sites} entries, "
+                f"got shape {tuple(known.shape)}"
+            )
+        if mask.dim() != 1 or mask.shape[0] != self.num_sites:
+            raise ValueError(
+                f"mask must be 1D with {self.num_sites} entries, "
+                f"got shape {tuple(mask.shape)}"
+            )
+        if mask.dtype != torch.bool:
+            raise TypeError(f"mask must have dtype torch.bool, got {mask.dtype}")
+
  
         N = self.num_sites
         device = self.site_tensors[0].device
-        known = known.to(device)
+        known = known.to(device).long()
         mask = mask.to(device)
+
+        if mask.any():
+            fixed_vals = known[mask]
+            lo = fixed_vals.min().item()
+            hi = fixed_vals.max().item()
+            if lo < 0 or hi >= self.physical_dim:
+                raise ValueError(
+                    f"known values at fixed positions must be in "
+                    f"[0, {self.physical_dim}), got range [{lo}, {hi}]"
+                )
  
         free_pos = (~mask).nonzero(as_tuple=False).flatten()
         fixed_pos = mask.nonzero(as_tuple=False).flatten()

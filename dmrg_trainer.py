@@ -1,4 +1,9 @@
-from typing import Optional, List, Dict
+import json
+import math
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Optional, List, Dict, Union, Callable
 from dataclasses import dataclass
 
 import torch
@@ -8,7 +13,7 @@ import torch.nn as nn
 class DMRGConfig:
     """Hyperparameters for DMRG training."""
     num_descent_steps: int = 1
-    max_bond_dim: int = 100
+    max_bond_dim: Union[int, Callable[[int], int]] = 100
     svd_cutoff: float = 1e-8
     lr: float = 0.01
     num_loops: int = 20
@@ -19,13 +24,31 @@ class DMRGConfig:
     adaptive_lr: bool = True
     plateau_factor: float = 10.0
     plateau_threshold: float = 1e-4
-    batches_per_loop: int = 0 
+    batches_per_loop: int = 0
+    metric_for_stopping: str = "train_nll"
+    eval_max_samples: int = 2048
+    seed: Optional[int] = None
+    checkpoint_every: int = 0
+    checkpoint_dir: Optional[str] = None
+    log_path: Optional[str] = None
 
 
 class DMRGTrainer:
     def __init__(self, mps: nn.Module, config: Optional[DMRGConfig] = None):
         self.mps = mps
         self.config = config or DMRGConfig()
+
+        if self.config.metric_for_stopping not in ("train_nll", "val_nll"):
+            raise ValueError(
+                f"metric_for_stopping must be 'train_nll' or 'val_nll', "
+                f"got {self.config.metric_for_stopping!r}"
+            )
+        
+        self._generator = torch.Generator(device="cpu")
+        if self.config.seed is not None:
+            self._generator.manual_seed(int(self.config.seed))
+
+        self._log_file = None
     
     def _build_left_envs(self, configurations: torch.Tensor) -> List[torch.Tensor]:
         """
@@ -33,12 +56,10 @@ class DMRGTrainer:
         Shape: (batch, D_{k-1}).
         """
         batch_size, num_sites = configurations.shape
-        assert num_sites == self.mps.num_sites
-
         environments = [None] * num_sites
         environments[0] = torch.ones(batch_size, 1, dtype=self.mps.dtype, device=configurations.device)
 
-        for site in range(num_sites-1):
+        for site in range(num_sites - 1):
             tensor = self.mps.site_tensors[site].data
             values = configurations[:, site]
             selected_matrices = tensor[:, values, :].permute(1, 0, 2)
@@ -53,12 +74,10 @@ class DMRGTrainer:
         Shape: (batch, D_k).
         """
         batch_size, num_sites = configurations.shape
-        assert num_sites == self.mps.num_sites
-
         environments = [None] * num_sites
         environments[num_sites - 1] = torch.ones(batch_size, 1, dtype=self.mps.dtype, device=configurations.device)
 
-        for site in range(num_sites-1, 0, -1):
+        for site in range(num_sites - 1, 0, -1):
             tensor = self.mps.site_tensors[site].data
             values = configurations[:, site]
             selected_matrices = tensor[:, values, :].permute(1, 0, 2)
@@ -110,7 +129,7 @@ class DMRGTrainer:
         Z = (theta.conj() * theta).real.sum()
         term1 = 2.0 * theta / Z.clamp_min(1e-30)
 
-        v_k  = configurations[:, k]
+        v_k = configurations[:, k]
         v_k1 = configurations[:, k + 1]
 
         theta_selected = theta[:, v_k, v_k1, :].permute(1, 0, 2)
@@ -161,6 +180,7 @@ class DMRGTrainer:
             else range(0, num_sites - 1)
         )
 
+        max_grad = 0.0
         for k in bonds:
             theta = self.mps.merge_sites(k)
             left_env = left_envs[k]
@@ -169,6 +189,7 @@ class DMRGTrainer:
             for _ in range(cfg.num_descent_steps):
                 grad = self._compute_gradient(k, theta, left_env, right_env, configurations)
                 grad_norm = grad.norm().item()
+                max_grad = max(max_grad, grad_norm)
 
                 bond_lr = lr
                 if cfg.adaptive_lr:
@@ -188,14 +209,52 @@ class DMRGTrainer:
             elif direction == "left" and k > 0:
                 right_envs[k] = self._update_right_env(right_envs[k + 1], k + 1, configurations)
 
+        return {"max_grad_norm": max_grad}
+
     @torch.no_grad()
     def _evaluate_nll(self, data: torch.Tensor, max_samples: int = 2048) -> float:
-        n = min(len(data), max_samples)
-        if n == len(data):
-            return self.mps.nll(data).item()
-        idx = torch.randperm(len(data), device=data.device)[:n]
-        return self.mps.nll(data[idx]).item()
-
+        cap = self.config.eval_max_samples
+        if cap <= 0 or len(data) <= cap:
+            return self.mps.nll(data, batch_size=self.config.batch_size).item()
+ 
+        idx = torch.randperm(len(data), generator=self._generator)[:cap]
+        return self.mps.nll(data[idx], batch_size=self.config.batch_size).item()
+    
+    def _bond_dim_for_loop(self, loop: int) -> int:
+        sched = self.config.max_bond_dim
+        if callable(sched):
+            return int(sched(loop))
+        return int(sched)
+    
+    def _open_log(self) -> None:
+        if self.config.log_path is None:
+            return
+        Path(self.config.log_path).parent.mkdir(parents=True, exist_ok=True)
+        self._log_file = open(self.config.log_path, "w", encoding="utf-8")
+ 
+    def _close_log(self) -> None:
+        if self._log_file is not None:
+            self._log_file.close()
+            self._log_file = None
+ 
+    def _write_log(self, record: Dict) -> None:
+        if self._log_file is None:
+            return
+        self._log_file.write(json.dumps(record) + "\n")
+        self._log_file.flush()
+ 
+    def _maybe_checkpoint(self, loop: int) -> Optional[str]:
+        cfg = self.config
+        if cfg.checkpoint_every <= 0 or cfg.checkpoint_dir is None:
+            return None
+        if (loop + 1) % cfg.checkpoint_every != 0:
+            return None
+        cp_dir = Path(cfg.checkpoint_dir)
+        cp_dir.mkdir(parents=True, exist_ok=True)
+        path = cp_dir / f"checkpoint_loop_{loop:04d}.pt"
+        self.mps.save(str(path))
+        return str(path)
+    
     @torch.no_grad()
     def train(
         self,
@@ -204,20 +263,33 @@ class DMRGTrainer:
     ) -> List[Dict]:
         cfg = self.config
         num_sites = self.mps.num_sites
-        assert train_data.shape[1] == num_sites
+        if train_data.shape[1] != num_sites:
+            raise ValueError(
+                f"train_data has {train_data.shape[1]} sites, expected {num_sites}"
+            )
 
         device = next(self.mps.parameters()).device
         train_data = train_data.to(device)
         if val_data is not None:
+            if val_data.shape[1] != num_sites:
+                raise ValueError(
+                    f"val_data has {val_data.shape[1]} sites, expected {num_sites}"
+                )
             val_data = val_data.to(device)
         if train_data.dtype != torch.long:
             train_data = train_data.long()
+        if val_data is not None and val_data.dtype != torch.long:
+            val_data = val_data.long()
+
+        metric = cfg.metric_for_stopping
+        if metric == "val_nll" and val_data is None:
+            metric = "train_nll"
 
         self.mps.left_canonicalize()
         self.mps.right_canonicalize()
 
         lr = cfg.lr
-        best_nll = float('inf')
+        best_metric = float('inf')
         wait = 0
         history: List[Dict] = []
 
@@ -226,8 +298,15 @@ class DMRGTrainer:
         else:
             n_batches = max(1, (len(train_data) + cfg.batch_size - 1) // cfg.batch_size)
 
+        self._open_log()
+        t_start = time.time()
+
         for loop in range(cfg.num_loops):
+            t_loop_start = time.time()
+            max_bond_dim = self._bond_dim_for_loop(loop)
+
             perm = torch.randperm(len(train_data), device=device)
+            stochastic_max_grad = 0.0
             for b in range(n_batches):
                 start = (b * cfg.batch_size) % len(train_data)
                 idx = perm[start:start + cfg.batch_size]
@@ -237,27 +316,42 @@ class DMRGTrainer:
 
                 left_env = self._build_left_envs(batch)
                 right_env = self._build_right_envs(batch)
-                self._sweep(batch, "right", lr, left_env, right_env)
+                stats_r = self._sweep(batch, "right", lr, left_env, right_env)
 
                 left_env = self._build_left_envs(batch)
                 right_env = self._build_right_envs(batch)
-                self._sweep(batch, "left", lr, left_env, right_env)
+                stats_l = self._sweep(batch, "left", lr, left_env, right_env)
+
+                stochastic_max_grad = max(stochastic_max_grad, stats_r["max_grad_norm"], stats_l["max_grad_norm"])
+
+                if cfg.stochastic:
+                        break
  
             train_nll = self._evaluate_nll(train_data)
  
             record: Dict = {
-                "loop": loop,
-                "train_nll": train_nll,
-                "lr": lr,
-                "bond_dims": self.mps.bond_dims,
-            }
+                    "loop": loop,
+                    "train_nll": train_nll,
+                    "lr": lr,
+                    "bond_dims": list(self.mps.bond_dims),
+                    "max_bond_dim_cap": max_bond_dim,
+                    "max_grad_norm": stochastic_max_grad,
+                    "elapsed_s": time.time() - t_loop_start,
+                    "wallclock_s": time.time() - t_start,
+                }
             if val_data is not None:
                 record["val_nll"] = self._evaluate_nll(val_data)
  
-            history.append(record)
+            cp_path = self._maybe_checkpoint(loop)
+            if cp_path is not None:
+                record["checkpoint_path"] = cp_path
  
-            if train_nll < best_nll - 1e-4:
-                best_nll = train_nll
+            history.append(record)
+            self._write_log(record)
+ 
+            monitor_value = record.get(metric, train_nll)
+            if monitor_value < best_metric - 1e-4:
+                best_metric = monitor_value
                 wait = 0
             else:
                 wait += 1
@@ -287,6 +381,13 @@ def dmrg_train(
     plateau_factor: float = 10.0,
     plateau_threshold: float = 1e-4,
     batches_per_loop: int = 0,
+    stochastic: bool = False,
+    metric_for_stopping: str = "train_nll",
+    eval_max_samples: int = 2048,
+    seed: Optional[int] = None,
+    checkpoint_every: int = 0,
+    checkpoint_dir: Optional[str] = None,
+    log_path: Optional[str] = None,
 ) -> List[Dict]:
     """
     Train an MPS Born Machine with DMRG two-site updates.
@@ -312,5 +413,12 @@ def dmrg_train(
         plateau_factor=plateau_factor,
         plateau_threshold=plateau_threshold,
         batches_per_loop=batches_per_loop,
+        stochastic=stochastic,
+        metric_for_stopping=metric_for_stopping,
+        eval_max_samples=eval_max_samples,
+        seed=seed,
+        checkpoint_every=checkpoint_every,
+        checkpoint_dir=checkpoint_dir,
+        log_path=log_path,
     )
     return DMRGTrainer(mps, config).train(train_data, val_data)

@@ -631,7 +631,7 @@ class MPS(nn.Module):
         physical_dim = A.shape[1]
         matrices = A.permute(1, 0, 2)
 
-        temp = torch.matmul(torch.matmul(L.conj().T, matrices), R)
+        temp = torch.matmul(torch.matmul(L.transpose(0, 1), matrices), R)
         conj_flat = matrices.conj().reshape(physical_dim, -1)
         temp_flat = temp.reshape(physical_dim, -1)
 
@@ -644,7 +644,7 @@ class MPS(nn.Module):
         """
         matrices = A.permute(1, 0, 2)
         conj = matrices.conj()
-        LA = torch.matmul(L.conj().T, matrices)
+        LA = torch.matmul(L.transpose(0, 1), matrices)
         return torch.matmul(LA.permute(0, 2, 1).unsqueeze(1), conj.unsqueeze(0))
     
     @torch.no_grad()

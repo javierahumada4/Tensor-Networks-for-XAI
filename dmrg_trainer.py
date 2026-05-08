@@ -25,6 +25,7 @@ class DMRGConfig:
     plateau_factor: float = 10.0
     plateau_threshold: float = 1e-4
     batches_per_loop: int = 0
+    stochastic: bool = False
     metric_for_stopping: str = "train_nll"
     eval_max_samples: int = 2048
     seed: Optional[int] = None
@@ -212,7 +213,7 @@ class DMRGTrainer:
         return {"max_grad_norm": max_grad}
 
     @torch.no_grad()
-    def _evaluate_nll(self, data: torch.Tensor, max_samples: int = 2048) -> float:
+    def _evaluate_nll(self, data: torch.Tensor) -> float:
         cap = self.config.eval_max_samples
         if cap <= 0 or len(data) <= cap:
             return self.mps.nll(data, batch_size=self.config.batch_size).item()

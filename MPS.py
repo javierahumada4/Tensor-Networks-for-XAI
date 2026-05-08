@@ -579,7 +579,66 @@ class MPS(nn.Module):
             self.site_tensors[k].data = (U * S.unsqueeze(0)).reshape(D_l, d1, n)
             self.site_tensors[k + 1].data = Vh.reshape(n, d2, D_r)
 
-        return S.detach().clone() 
+        return S.detach().clone()
+    
+    @torch.no_grad()
+    def swap_adjacent(
+        self,
+        k: int,
+        max_bond_dim: Optional[int] = None,
+        cutoff: float = 0.0,
+    ) -> None:
+        """
+        Swap the physical indices of sites k and k+1 in place.
+        """
+        if not (0 <= k < self.num_sites - 1):
+            raise ValueError(f"Invalid bond index k={k}; expected 0 <= k < {self.num_sites - 1}")
+        self._validate_truncation(max_bond_dim, cutoff)
+ 
+        theta = self.merge_sites(k)
+        theta_swapped = theta.permute(0, 2, 1, 3).contiguous()
+ 
+        D_l, d_k, d_kp1, D_r = theta.shape
+        if max_bond_dim is None:
+            effective_cap = min(D_l * d_kp1, d_k * D_r)
+        else:
+            effective_cap = max_bond_dim
+            
+        self.split_and_truncate(
+            k, theta_swapped, direction="right",
+            max_bond_dim=effective_cap,
+            cutoff=cutoff,
+        )
+ 
+    @torch.no_grad()
+    def permute_sites(
+        self,
+        permutation: List[int],
+        max_bond_dim: Optional[int] = None,
+        cutoff: float = 0.0,
+    ) -> None:
+        """
+        Permute the physical sites of the MPS in place.
+        """
+        if sorted(permutation) != list(range(self.num_sites)):
+            raise ValueError(
+                f"permutation must be a permutation of range({self.num_sites}), got {permutation}"
+            )
+        self._validate_truncation(max_bond_dim, cutoff)
+ 
+        target = [0] * self.num_sites
+        for k, src in enumerate(permutation):
+            target[src] = k
+ 
+        current = list(range(self.num_sites))
+        for k in range(self.num_sites):
+            wanted = target[k]
+            j = current.index(wanted)
+            while j > k:
+                self.swap_adjacent(j - 1, max_bond_dim=max_bond_dim, cutoff=cutoff)
+                current[j - 1], current[j] = current[j], current[j - 1]
+                j -= 1
+ 
     
     # ----------------------------------------------------------------------
     # Transfer environments and RDM kernels

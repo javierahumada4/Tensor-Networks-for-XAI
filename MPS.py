@@ -928,6 +928,7 @@ class MPS(nn.Module):
         self,
         max_bond_dim: Optional[int] = None,
         cutoff: float = 0.0,
+        preserve_state: bool = True,
     ) -> List[float]:
         """
          Bipartite von Neumann entropy at every bond:
@@ -936,7 +937,13 @@ class MPS(nn.Module):
  
         where σ_i are the singular values at bond k.  Returns ``num_sites - 1`` values.
         """
-        svs = self.left_canonicalize(truncate=True, max_bond_dim=max_bond_dim, cutoff=cutoff)
+        backup = [p.data.clone() for p in self.site_tensors] if preserve_state else None
+        try:
+            svs = self.left_canonicalize(truncate=True, max_bond_dim=max_bond_dim, cutoff=cutoff)
+        finally:
+            if backup is not None:
+                for p, b in zip(self.site_tensors, backup):
+                    p.data = b
         entropies: List[float] = []
         for S in svs:
             p = S.square()

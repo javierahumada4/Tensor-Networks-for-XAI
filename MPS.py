@@ -9,6 +9,12 @@ class MPS(nn.Module):
     Matrix Product State with open boundary
     """
     _LOG_FLOOR: float = 1e-300
+    _DTYPE_MAP = {
+        "float32": torch.float32,
+        "float64": torch.float64,
+        "complex64": torch.complex64,
+        "complex128": torch.complex128,
+    }
 
     def __init__(
             self,
@@ -130,9 +136,11 @@ class MPS(nn.Module):
             self_is_complex = self.dtype in (torch.complex64, torch.complex128)
             new_is_complex = new_dtype in (torch.complex64, torch.complex128)
             if self_is_complex != new_is_complex:
-                new_dtype = None
-            else:
-                self.dtype = new_dtype
+                raise TypeError(
+                    "Cannot change between real and complex dtype via .to() "
+                    f"({self.dtype} -> {new_dtype}). Construct a new MPS instead."
+                )
+            self.dtype = new_dtype
  
         rebuilt_kwargs = dict(kwargs)
         if new_dtype is not None:
@@ -164,13 +172,21 @@ class MPS(nn.Module):
         """
         Reconstruct an MPS previously saved with :meth:`save`.
         """
-        ckpt = torch.load(path, map_location=map_location, weights_only=False)
+        ckpt = torch.load(path, map_location=map_location, weights_only=True)
         if "format_version" not in ckpt or ckpt["format_version"] != 1:
             raise ValueError(
                 f"Unrecognised checkpoint format at {path!r}; "
                 "expected format_version=1."
             )
         config = ckpt["config"]
+        dtype_value = config["dtype"]
+        if isinstance(dtype_value, torch.dtype):
+            dtype = dtype_value
+        else:
+            try:
+                dtype = cls._DTYPE_MAP[str(dtype_value)]
+            except KeyError as exc:
+                raise ValueError(f"Unsupported checkpoint dtype: {dtype_value!r}") from exc
         tensors: List[torch.Tensor] = ckpt["tensors"]
  
         if len(tensors) != config["num_sites"]:
@@ -183,11 +199,11 @@ class MPS(nn.Module):
             num_sites=config["num_sites"],
             bond_dim=config["bond_dim"],
             physical_dim=config["physical_dim"],
-            dtype=config["dtype"],
+            dtype=dtype,
         )
 
         model.site_tensors = nn.ParameterList(
-            [nn.Parameter(t.to(config["dtype"])) for t in tensors]
+            [nn.Parameter(t.to(dtype=dtype)) for t in tensors]
         )
         return model
  

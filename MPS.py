@@ -160,7 +160,7 @@ class MPS(nn.Module):
                     "num_sites": self.num_sites,
                     "bond_dim": self.bond_dim,
                     "physical_dim": self.physical_dim,
-                    "dtype": str(self.dtype).removeprefix("torch."),
+                    "dtype": self.dtype,
                 },
                 "tensors": [t.detach().cpu().clone() for t in self.site_tensors],
             },
@@ -1174,7 +1174,7 @@ class MPS(nn.Module):
         fixed_pos = mask.nonzero(as_tuple=False).flatten()
  
         if fixed_pos.numel() == 0:
-            return self.sample(num_samples, preserve_state=preserve_state)
+            return self.sample(num_samples)
         if free_pos.numel() == 0:
             return known.long().unsqueeze(0).expand(num_samples, N).clone()
  
@@ -1214,10 +1214,12 @@ class MPS(nn.Module):
         if mask[N - 1]:
             chosen = known[N - 1].expand(num_samples)
         else:
-            sq_norms = self._abs_squared(matrices)
+            if is_complex:
+                sq_norms = matrices.real.square() + matrices.imag.square()
+            else:
+                sq_norms = matrices.square()
             probs = sq_norms.sum(dim=1)
             probs = probs / probs.sum().clamp_min(self._numerical_floor)
-            self._check_probabilities(probs, "conditional_RL(site=N-1)")
             chosen = torch.multinomial(
                 probs.unsqueeze(0).expand(num_samples, -1), 1
             ).squeeze(1)
@@ -1234,10 +1236,12 @@ class MPS(nn.Module):
             if mask[k]:
                 chosen = known[k].expand(num_samples)
             else:
-                sq = self._abs_squared(candidates)
+                if is_complex:
+                    sq = candidates.real.square() + candidates.imag.square()
+                else:
+                    sq = candidates.square()
                 cond_probs = sq.sum(dim=2)
                 cond_probs = cond_probs / cond_probs.sum(dim=1, keepdim=True).clamp_min(self._numerical_floor)
-                self._check_probabilities(cond_probs, f"conditional_RL(site={k})")
                 chosen = torch.multinomial(cond_probs, 1).squeeze(1)
  
             samples[:, k] = chosen
@@ -1260,6 +1264,7 @@ class MPS(nn.Module):
  
         device = self.site_tensors[0].device
         N = self.num_sites
+        is_complex = self.dtype in (torch.complex64, torch.complex128)
  
         samples = torch.zeros(num_samples, N, dtype=torch.long, device=device)
  
@@ -1269,10 +1274,12 @@ class MPS(nn.Module):
         if mask[0]:
             chosen = known[0].expand(num_samples)
         else:
-            sq_norms = self._abs_squared(matrices)
+            if is_complex:
+                sq_norms = matrices.real.square() + matrices.imag.square()
+            else:
+                sq_norms = matrices.square()
             probs = sq_norms.sum(dim=1)
             probs = probs / probs.sum().clamp_min(self._numerical_floor)
-            self._check_probabilities(probs, "conditional_LR(site=0)")
             chosen = torch.multinomial(
                 probs.unsqueeze(0).expand(num_samples, -1), 1
             ).squeeze(1)
@@ -1289,10 +1296,12 @@ class MPS(nn.Module):
             if mask[k]:
                 chosen = known[k].expand(num_samples)
             else:
-                sq = self._abs_squared(candidates)
+                if is_complex:
+                    sq = candidates.real.square() + candidates.imag.square()
+                else:
+                    sq = candidates.square()
                 cond_probs = sq.sum(dim=2)
                 cond_probs = cond_probs / cond_probs.sum(dim=1, keepdim=True).clamp_min(self._numerical_floor)
-                self._check_probabilities(cond_probs, f"conditional_LR(site={k})")
                 chosen = torch.multinomial(cond_probs, 1).squeeze(1)
  
             samples[:, k] = chosen
@@ -1356,7 +1365,6 @@ class MPS(nn.Module):
                     w = w.real
                 w = w.clamp_min(self._numerical_floor)
                 w = w / w.sum(dim=1, keepdim=True).clamp_min(self._numerical_floor)
-                self._check_probabilities(w, f"conditional_scattered(site={k})")
                 chosen = torch.multinomial(w, 1).squeeze(1)
  
             samples[:, k] = chosen

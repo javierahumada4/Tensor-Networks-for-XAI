@@ -372,7 +372,7 @@ class MPS(nn.Module):
         raise ValueError(f"Unsupported reduction: {reduction!r}. Use 'mean', 'sum', or 'none'.")
     
     @torch.no_grad()
-    def anomaly_score(self, configurations: torch.Tensor, batch_size: Optional[int] = None) -> torch.Tensor:
+    def anomaly_score(self, configurations: torch.Tensor) -> torch.Tensor:
         """
         Per-sample anomaly score, defined as the negative log-likelihood:
  
@@ -382,7 +382,7 @@ class MPS(nn.Module):
         learned model.  Used as the raw signal for thresholding in
         anomaly-detection pipelines.
         """
-        return -self.log_prob(configurations, batch_size=batch_size)
+        return -self.log_prob(configurations)
     
     @torch.no_grad()
     def normalize_state(self) -> None:
@@ -1040,85 +1040,66 @@ class MPS(nn.Module):
  
         return out
     
-    @staticmethod
-    def _abs_squared(x: torch.Tensor) -> torch.Tensor:
-        """Elementwise |x|^2 for real or complex tensors."""
-        if x.is_complex():
-            return x.real.square() + x.imag.square()
-        return x.square()
-    
-    @staticmethod
-    def _check_probabilities(probs: torch.Tensor, context: str) -> None:
-        """Raise a clear error before torch.multinomial sees invalid probabilities."""
-        if not torch.isfinite(probs).all():
-            raise RuntimeError(
-                f"Non-finite conditional probabilities in {context}. "
-                "MPS likely under/overflowed; try normalize_state()."
-            )
-        if (probs < 0).any():
-            raise RuntimeError(f"Negative conditional probabilities in {context}.")
-    
     # ----------------------------------------------------------------------
     # Sampling
     # ----------------------------------------------------------------------
     
     @torch.no_grad()
-    def sample(self, num_samples: int = 1, preserve_state: bool = False) -> torch.Tensor:
+    def sample(self, num_samples: int = 1) -> torch.Tensor:
         """
         Draw exact, independent samples from P(v) = |Ψ(v)|² / Z.
         """
         if num_samples < 1:
             raise ValueError(f"num_samples must be >= 1, got {num_samples}")
-        backup = [p.data.clone() for p in self.site_tensors] if preserve_state else None
-        try:
-            self.left_canonicalize()
-    
-            device = self.site_tensors[0].device
-            N = self.num_sites
-            is_complex = self.dtype in (torch.complex64, torch.complex128)
-    
-            samples = torch.zeros(num_samples, N, dtype=torch.long, device=device)
-    
-            A_last = self.site_tensors[N - 1].data
-            matrices = A_last.permute(1, 0, 2).squeeze(2)
-    
-            sq_norms = self._abs_squared(matrices)
-            probs = sq_norms.sum(dim=1)
-            probs = probs / probs.sum().clamp_min(self._numerical_floor)
-            self._check_probabilities(probs, "sample(site=N-1)")
-    
-            chosen = torch.multinomial(
-                probs.unsqueeze(0).expand(num_samples, -1), 1
-            ).squeeze(1)
-            samples[:, N - 1] = chosen
-    
-            x = matrices[chosen]
-    
-            for k in range(N - 2, -1, -1):
-                A_k = self.site_tensors[k].data
-                mats = A_k.permute(1, 0, 2)
-    
-                candidates = torch.matmul(mats, x.T)
-                candidates = candidates.permute(2, 0, 1)
-    
-                sq = self._abs_squared(candidates)
-                cond_probs = sq.sum(dim=2)
-                cond_probs = cond_probs / cond_probs.sum(dim=1, keepdim=True).clamp_min(self._numerical_floor)
-                self._check_probabilities(cond_probs, f"sample(site={k})")
-    
-                chosen = torch.multinomial(cond_probs, 1).squeeze(1)
-                samples[:, k] = chosen
-    
-                idx = chosen.unsqueeze(1).unsqueeze(2).expand(
-                    num_samples, 1, candidates.shape[2]
-                )
-                x = candidates.gather(1, idx).squeeze(1)
-            
-            return samples
-        finally:
-            if backup is not None:
-                for p, b in zip(self.site_tensors, backup):
-                    p.data = b
+        
+        self.left_canonicalize()
+ 
+        device = self.site_tensors[0].device
+        N = self.num_sites
+        is_complex = self.dtype in (torch.complex64, torch.complex128)
+ 
+        samples = torch.zeros(num_samples, N, dtype=torch.long, device=device)
+ 
+        A_last = self.site_tensors[N - 1].data
+        matrices = A_last.permute(1, 0, 2).squeeze(2)
+ 
+        if is_complex:
+            sq_norms = matrices.real.square() + matrices.imag.square()
+        else:
+            sq_norms = matrices.square()
+        probs = sq_norms.sum(dim=1)
+        probs = probs / probs.sum().clamp_min(self._numerical_floor)
+ 
+        chosen = torch.multinomial(
+            probs.unsqueeze(0).expand(num_samples, -1), 1
+        ).squeeze(1)
+        samples[:, N - 1] = chosen
+ 
+        x = matrices[chosen]
+ 
+        for k in range(N - 2, -1, -1):
+            A_k = self.site_tensors[k].data
+            mats = A_k.permute(1, 0, 2)
+ 
+            candidates = torch.matmul(mats, x.T)
+            candidates = candidates.permute(2, 0, 1)
+ 
+            if is_complex:
+                sq = candidates.real.square() + candidates.imag.square()
+            else:
+                sq = candidates.square()
+            cond_probs = sq.sum(dim=2)
+            cond_probs = cond_probs / cond_probs.sum(dim=1, keepdim=True).clamp_min(self._numerical_floor)
+ 
+            chosen = torch.multinomial(cond_probs, 1).squeeze(1)
+            samples[:, k] = chosen
+ 
+            idx = chosen.unsqueeze(1).unsqueeze(2).expand(
+                num_samples, 1, candidates.shape[2]
+            )
+            x = candidates.gather(1, idx).squeeze(1)
+ 
+        return samples
     
     @torch.no_grad()
     def sample_conditional(
@@ -1126,7 +1107,6 @@ class MPS(nn.Module):
         known: torch.Tensor,
         mask: torch.Tensor,
         num_samples: int = 1,
-        preserve_state: bool = False,
     ) -> torch.Tensor:
         """
         Conditional sampling: generate completions for partially known
@@ -1171,18 +1151,12 @@ class MPS(nn.Module):
         if free_pos.numel() == 0:
             return known.long().unsqueeze(0).expand(num_samples, N).clone()
  
-        backup = [p.data.clone() for p in self.site_tensors] if preserve_state else None
-        try:
-            if fixed_pos.min().item() > free_pos.max().item():
-                return self._sample_conditional_RL(known, mask, num_samples)
-            if fixed_pos.max().item() < free_pos.min().item():
-                return self._sample_conditional_LR(known, mask, num_samples)
-
-            return self._sample_conditional_scattered(known, mask, num_samples)
-        finally:
-            if backup is not None:
-                for p, b in zip(self.site_tensors, backup):
-                    p.data = b
+        if fixed_pos.min().item() > free_pos.max().item():
+            return self._sample_conditional_RL(known, mask, num_samples)
+        if fixed_pos.max().item() < free_pos.min().item():
+            return self._sample_conditional_LR(known, mask, num_samples)
+ 
+        return self._sample_conditional_scattered(known, mask, num_samples)
  
     @torch.no_grad()
     def _sample_conditional_RL(

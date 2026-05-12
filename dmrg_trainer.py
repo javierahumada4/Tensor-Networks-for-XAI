@@ -1,9 +1,10 @@
 import json
 import math
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, List, Dict, Union, Callable
+from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
@@ -31,7 +32,6 @@ class DMRGConfig:
     checkpoint_every: int = 0
     checkpoint_dir: Optional[str] = None
     log_path: Optional[str] = None
-    improvement_threshold: float = 1e-4
 
 
 class DMRGTrainer:
@@ -50,10 +50,6 @@ class DMRGTrainer:
             self._generator.manual_seed(int(self.config.seed))
 
         self._log_file = None
-
-    def _randperm(self, n: int, device: torch.device) -> torch.Tensor:
-        """Deterministic randperm using the trainer RNG, moved to ``device``."""
-        return torch.randperm(n, generator=self._generator, device="cpu").to(device)
     
     def _build_left_envs(self, configurations: torch.Tensor) -> List[torch.Tensor]:
         """
@@ -110,9 +106,9 @@ class DMRGTrainer:
         if psi_v.is_complex():
             phase = torch.where(abs_psi > 0, psi_v / abs_psi.clamp_min(eps), torch.ones_like(psi_v))
             return torch.where(small, phase * eps, psi_v)
-
-        sign = torch.where(psi_v >= 0, torch.ones_like(psi_v), -torch.ones_like(psi_v))
-        return torch.where(small, sign * eps, psi_v)
+        else:
+            sign = torch.where(psi_v >= 0, torch.ones_like(psi_v), -torch.ones_like(psi_v))
+            return torch.where(small, sign * eps, psi_v)
     
     def _compute_gradient(
         self,
@@ -176,7 +172,6 @@ class DMRGTrainer:
         lr: float,
         left_envs: List[torch.Tensor],
         right_envs: List[torch.Tensor],
-        max_bond_dim: int,
     ) -> None:
         num_sites = self.mps.num_sites
         cfg = self.config
@@ -207,7 +202,7 @@ class DMRGTrainer:
                 theta = theta - bond_lr * grad
 
             self.mps.split_and_truncate(
-                k, theta, direction, max_bond_dim, cfg.svd_cutoff
+                k, theta, direction, cfg.max_bond_dim, cfg.svd_cutoff
             )
 
             if direction == "right" and k + 1 < num_sites - 1:
@@ -223,7 +218,7 @@ class DMRGTrainer:
         if cap <= 0 or len(data) <= cap:
             return self.mps.nll(data, batch_size=self.config.batch_size).item()
  
-        idx = self._randperm(len(data), data.device)[:cap]
+        idx = torch.randperm(len(data), generator=self._generator)[:cap]
         return self.mps.nll(data[idx], batch_size=self.config.batch_size).item()
     
     def _bond_dim_for_loop(self, loop: int) -> int:
@@ -249,14 +244,7 @@ class DMRGTrainer:
         self._log_file.write(json.dumps(record) + "\n")
         self._log_file.flush()
  
-    def _maybe_checkpoint(
-        self,
-        loop: int,
-        lr: float,
-        wait: int,
-        best_metric: float,
-    ) -> Optional[str]:
-        """Save an MPS snapshot and trainer state for resumability diagnostics."""
+    def _maybe_checkpoint(self, loop: int) -> Optional[str]:
         cfg = self.config
         if cfg.checkpoint_every <= 0 or cfg.checkpoint_dir is None:
             return None
@@ -264,25 +252,9 @@ class DMRGTrainer:
             return None
         cp_dir = Path(cfg.checkpoint_dir)
         cp_dir.mkdir(parents=True, exist_ok=True)
-        mps_path = cp_dir / f"checkpoint_loop_{loop:04d}.pt"
-        state_path = cp_dir / f"trainer_state_loop_{loop:04d}.pt"
-        self.mps.save(str(mps_path))
-        torch.save(
-            {
-                "format_version": 1,
-                "loop": loop,
-                "lr": lr,
-                "wait": wait,
-                "best_metric": best_metric,
-                "rng_state": self._generator.get_state(),
-                "config": {
-                    key: (str(value) if callable(value) else value)
-                    for key, value in vars(cfg).items()
-                },
-            },
-            str(state_path),
-        )
-        return str(mps_path)
+        path = cp_dir / f"checkpoint_loop_{loop:04d}.pt"
+        self.mps.save(str(path))
+        return str(path)
     
     @torch.no_grad()
     def train(
@@ -314,6 +286,7 @@ class DMRGTrainer:
         if metric == "val_nll" and val_data is None:
             metric = "train_nll"
 
+        self.mps.left_canonicalize()
         self.mps.right_canonicalize()
 
         lr = cfg.lr
@@ -329,71 +302,67 @@ class DMRGTrainer:
         self._open_log()
         t_start = time.time()
 
-        try:
-            for loop in range(cfg.num_loops):
-                t_loop_start = time.time()
-                max_bond_dim = self._bond_dim_for_loop(loop)
+        for loop in range(cfg.num_loops):
+            t_loop_start = time.time()
+            max_bond_dim = self._bond_dim_for_loop(loop)
 
-                perm = self._randperm(len(train_data), device=device)
-                stochastic_max_grad = 0.0
-                for b in range(n_batches):
-                    start = (b * cfg.batch_size) % len(train_data)
-                    idx = perm[start:start + cfg.batch_size]
-                    if len(idx) < 2:
-                        continue
-                    batch = train_data[idx]
+            perm = torch.randperm(len(train_data), device=device)
+            stochastic_max_grad = 0.0
+            for b in range(n_batches):
+                start = (b * cfg.batch_size) % len(train_data)
+                idx = perm[start:start + cfg.batch_size]
+                if len(idx) < 2:
+                    continue
+                batch = train_data[idx]
 
-                    left_env = self._build_left_envs(batch)
-                    right_env = self._build_right_envs(batch)
-                    stats_r = self._sweep(batch, "right", lr, left_env, right_env, max_bond_dim)
+                left_env = self._build_left_envs(batch)
+                right_env = self._build_right_envs(batch)
+                stats_r = self._sweep(batch, "right", lr, left_env, right_env)
 
-                    right_env = self._build_right_envs(batch)
-                    stats_l = self._sweep(batch, "left", lr, left_env, right_env, max_bond_dim)
+                left_env = self._build_left_envs(batch)
+                right_env = self._build_right_envs(batch)
+                stats_l = self._sweep(batch, "left", lr, left_env, right_env)
 
-                    stochastic_max_grad = max(stochastic_max_grad, stats_r["max_grad_norm"], stats_l["max_grad_norm"])
+                stochastic_max_grad = max(stochastic_max_grad, stats_r["max_grad_norm"], stats_l["max_grad_norm"])
 
-                    if cfg.stochastic:
-                            break
-    
-                train_nll = self._evaluate_nll(train_data)
-    
-                record: Dict = {
-                        "loop": loop,
-                        "train_nll": train_nll,
-                        "lr": lr,
-                        "bond_dims": list(self.mps.bond_dims),
-                        "max_bond_dim_cap": max_bond_dim,
-                        "max_grad_norm": stochastic_max_grad,
-                        "elapsed_s": time.time() - t_loop_start,
-                        "wallclock_s": time.time() - t_start,
-                    }
-                if val_data is not None:
-                    record["val_nll"] = self._evaluate_nll(val_data)
-    
-                monitor_value = record.get(metric, train_nll)
-                if monitor_value < best_metric - cfg.improvement_threshold:
-                    best_metric = monitor_value
+                if cfg.stochastic:
+                        break
+ 
+            train_nll = self._evaluate_nll(train_data)
+ 
+            record: Dict = {
+                    "loop": loop,
+                    "train_nll": train_nll,
+                    "lr": lr,
+                    "bond_dims": list(self.mps.bond_dims),
+                    "max_bond_dim_cap": max_bond_dim,
+                    "max_grad_norm": stochastic_max_grad,
+                    "elapsed_s": time.time() - t_loop_start,
+                    "wallclock_s": time.time() - t_start,
+                }
+            if val_data is not None:
+                record["val_nll"] = self._evaluate_nll(val_data)
+ 
+            cp_path = self._maybe_checkpoint(loop)
+            if cp_path is not None:
+                record["checkpoint_path"] = cp_path
+ 
+            history.append(record)
+            self._write_log(record)
+ 
+            monitor_value = record.get(metric, train_nll)
+            if monitor_value < best_metric - 1e-4:
+                best_metric = monitor_value
+                wait = 0
+            else:
+                wait += 1
+                if wait >= cfg.patience:
+                    lr *= cfg.lr_shrink
                     wait = 0
-                else:
-                    wait += 1
-                    if wait >= cfg.patience:
-                        lr *= cfg.lr_shrink
-                        wait = 0
-
-                cp_path = self._maybe_checkpoint(loop)
-                if cp_path is not None:
-                    record["checkpoint_path"] = cp_path
-    
-                history.append(record)
-                self._write_log(record)
-
-                if lr < cfg.lr_min:
-                    break
-    
-            return history
-        finally:
-            self._close_log()
-
+                    if lr < cfg.lr_min:
+                        break
+ 
+        return history
 
 def dmrg_train(
     mps: nn.Module,
@@ -420,7 +389,6 @@ def dmrg_train(
     checkpoint_every: int = 0,
     checkpoint_dir: Optional[str] = None,
     log_path: Optional[str] = None,
-    improvement_threshold: float = 1e-4,
 ) -> List[Dict]:
     """
     Train an MPS Born Machine with DMRG two-site updates.
@@ -453,6 +421,5 @@ def dmrg_train(
         checkpoint_every=checkpoint_every,
         checkpoint_dir=checkpoint_dir,
         log_path=log_path,
-        improvement_threshold=improvement_threshold,
     )
     return DMRGTrainer(mps, config).train(train_data, val_data)

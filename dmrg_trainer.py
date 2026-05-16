@@ -1,19 +1,80 @@
 import json
 import math
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, List, Dict, Union, Callable
-from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
 
 @dataclass
+@dataclass
 class DMRGConfig:
-    """Hyperparameters for DMRG training."""
+    """Hyperparameters for DMRG training.
+
+    Parameters
+    ----------
+    num_descent_steps : int
+        Number of gradient steps per bond per sweep.
+    max_bond_dim : int
+        Constant cap on the SVD truncation rank.  Used unless
+        ``max_bond_dim_schedule`` overrides it.
+    max_bond_dim_schedule : Optional[Callable[[int], int]]
+        Optional callable that returns the bond-dim cap for a given loop
+        index.  When provided, overrides ``max_bond_dim``.
+    svd_cutoff : float
+        Relative singular-value cutoff used inside the MPS SVD.
+    lr : float
+        Initial learning rate for the bond-wise gradient step.
+    num_loops : int
+        Number of full DMRG sweeps (right + left counts as one loop).
+    batch_size : int
+        Minibatch size used during sweeps.
+    lr_shrink, lr_min, patience : float, float, int
+        Patience-based LR scheduler.  When the monitored metric fails to
+        improve by ``improvement_threshold`` for ``patience`` consecutive
+        loops, ``lr`` is multiplied by ``lr_shrink``.  Training stops when
+        ``lr`` falls below ``lr_min``.
+    improvement_threshold : float
+        Minimum decrease in the monitored metric counted as an
+        improvement.
+    adaptive_lr : bool
+        If True, locally boost ``lr`` by ``plateau_factor`` when the
+        relative gradient norm at a bond drops below ``plateau_threshold``.
+        Disabled by default; see notes in `_sweep`.
+    plateau_factor, plateau_threshold : float, float
+        Parameters of the per-bond adaptive boost.
+    batches_per_loop : int
+        Number of minibatches per loop.  Zero means use the natural number
+        of batches that covers the training set once.
+    stochastic : bool
+        If True, only one minibatch per loop is used (legacy switch).
+    metric_for_stopping : str
+        Either "train_nll" or "val_nll".  Used by the patience-based
+        scheduler.  Falls back to "train_nll" if val_data is None.
+    eval_max_samples : int
+        Subsampling cap for NLL evaluation.  0 disables subsampling.
+    seed : Optional[int]
+        Seed for the RNG used in evaluation subsampling and minibatch
+        permutation.  When set, training is reproducible (modulo CUDA's
+        non-determinism in matmul/SVD; see torch.use_deterministic_algorithms).
+    checkpoint_every : int
+        If > 0, save the MPS and the trainer state every ``checkpoint_every``
+        loops.  Trainer state captures lr, patience counter, best metric and
+        the RNG state, so training can be resumed exactly with
+        :meth:`DMRGTrainer.resume`.
+    checkpoint_dir : Optional[str]
+        Directory for checkpoint files.  Caller is responsible for
+        validating this path; no sanitization is performed.
+    log_path : Optional[str]
+        Path to a JSONL log file.  Caller is responsible for validating
+        this path.
+    """
+
     num_descent_steps: int = 1
-    max_bond_dim: Union[int, Callable[[int], int]] = 100
+    max_bond_dim: int = 100
+    max_bond_dim_schedule: Optional[Callable[[int], int]] = None
     svd_cutoff: float = 1e-8
     lr: float = 0.01
     num_loops: int = 20
@@ -21,6 +82,7 @@ class DMRGConfig:
     lr_shrink: float = 0.5
     lr_min: float = 1e-6
     patience: int = 5
+    improvement_threshold: float = 1e-4
     adaptive_lr: bool = True
     plateau_factor: float = 10.0
     plateau_threshold: float = 1e-4
@@ -44,8 +106,19 @@ class DMRGTrainer:
                 f"metric_for_stopping must be 'train_nll' or 'val_nll', "
                 f"got {self.config.metric_for_stopping!r}"
             )
+        if self.config.max_bond_dim < 1:
+            raise ValueError(
+                f"max_bond_dim must be >= 1, got {self.config.max_bond_dim}"
+            )
         
-        self._generator = torch.Generator(device="cpu")
+        try:
+            device = next(self.mps.parameters()).device
+        except StopIteration:
+            device = torch.device("cpu")
+        self._generator_device = (
+            device if device.type == "cuda" else torch.device("cpu")
+        )
+        self._generator = torch.Generator(device=self._generator_device.type)
         if self.config.seed is not None:
             self._generator.manual_seed(int(self.config.seed))
 

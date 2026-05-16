@@ -1,14 +1,17 @@
+import dataclasses
 import json
 import math
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, List, Dict, Union, Callable
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
 
-@dataclass
+_LOG_RECORD_VERSION: int = 1
+_TRAINER_STATE_VERSION: int = 1
+
 @dataclass
 class DMRGConfig:
     """Hyperparameters for DMRG training.
@@ -123,6 +126,10 @@ class DMRGTrainer:
             self._generator.manual_seed(int(self.config.seed))
 
         self._log_file = None
+
+    # ------------------------------------------------------------------
+    #  Environment construction and updates
+    # ------------------------------------------------------------------
     
     def _build_left_envs(self, configurations: torch.Tensor) -> List[torch.Tensor]:
         """
@@ -170,6 +177,10 @@ class DMRGTrainer:
         selected_matrices = tensor[:, configs[:, site], :].permute(1, 0, 2)
         return torch.bmm(selected_matrices, right_env.unsqueeze(2)).squeeze(2)
     
+    # ------------------------------------------------------------------
+    #  Numerical helpers
+    # ------------------------------------------------------------------
+    
     @staticmethod
     def _safe_psi(psi_v: torch.Tensor, eps: float = 1e-30) -> torch.Tensor:
         """
@@ -189,6 +200,17 @@ class DMRGTrainer:
         else:
             sign = torch.where(psi_v >= 0, torch.ones_like(psi_v), -torch.ones_like(psi_v))
             return torch.where(small, sign * eps, psi_v)
+        
+    @staticmethod
+    def _z_floor(dtype: torch.dtype) -> float:
+        """Smallest allowed denominator for the partition function, by dtype."""
+        if dtype in (torch.float32, torch.complex64):
+            return 1e-15
+        return 1e-30
+    
+    # ------------------------------------------------------------------
+    #  Gradient
+    # ------------------------------------------------------------------
     
     def _compute_gradient(
         self,
@@ -207,18 +229,18 @@ class DMRGTrainer:
         physical_dim = self.mps.physical_dim
         batch_size = configurations.shape[0]
 
-        Z = (theta.conj() * theta).real.sum()
-        term1 = 2.0 * theta / Z.clamp_min(1e-30)
+        z_floor = self._z_floor(theta.dtype)
+        Z = (theta.conj() * theta).real.sum().to(torch.float64)
+        Z_safe = Z.clamp_min(z_floor).to(theta.real.dtype if theta.is_complex() else theta.dtype)
+        term1 = 2.0 * theta / Z_safe
 
         v_k = configurations[:, k]
         v_k1 = configurations[:, k + 1]
 
         theta_selected = theta[:, v_k, v_k1, :].permute(1, 0, 2)
-
-        psi_v = torch.bmm(left_env.unsqueeze(1),
-                          torch.bmm(theta_selected, right_env.unsqueeze(2))).reshape(batch_size)
+        psi_v = torch.einsum("ba,bac,bc->b", left_env, theta_selected, right_env)
         
-        psi_safe = self._safe_psi(psi_v)
+        psi_safe = self._safe_psi(psi_v, eps=z_floor)
  
         D_l, _, _, D_r = theta.shape
  
@@ -244,6 +266,10 @@ class DMRGTrainer:
  
         return term1 - term2
     
+    # ------------------------------------------------------------------
+    #  Sweep
+    # ------------------------------------------------------------------
+    
     @torch.no_grad()
     def _sweep(
         self,
@@ -252,6 +278,7 @@ class DMRGTrainer:
         lr: float,
         left_envs: List[torch.Tensor],
         right_envs: List[torch.Tensor],
+        max_bond_dim: int,
     ) -> None:
         num_sites = self.mps.num_sites
         cfg = self.config
@@ -261,36 +288,67 @@ class DMRGTrainer:
             else range(0, num_sites - 1)
         )
 
-        max_grad = 0.0
+        grad_norms: List[torch.Tensor] = []
+        n_skipped_nan = 0
+        z_floor = self._z_floor(self.mps.dtype)
+
+        if cfg.adaptive_lr:
+            plateau_factor_t = torch.tensor(
+                cfg.plateau_factor, device=configurations.device,
+                dtype=self.mps.dtype,
+            )
+            unit_t = torch.tensor(
+                1.0, device=configurations.device, dtype=self.mps.dtype,
+            )
+
         for k in bonds:
             theta = self.mps.merge_sites(k)
             left_env = left_envs[k]
             right_env = right_envs[k + 1]
 
+            updated = False
             for _ in range(cfg.num_descent_steps):
                 grad = self._compute_gradient(k, theta, left_env, right_env, configurations)
-                grad_norm = grad.norm().item()
-                max_grad = max(max_grad, grad_norm)
 
-                bond_lr = lr
+                if not torch.isfinite(grad).all():
+                    n_skipped_nan += 1
+                    continue
+
+                grad_norm = grad.norm()
+                grad_norms.append(grad_norm)
+
                 if cfg.adaptive_lr:
-                    theta_norm = theta.norm().item()
-                    relative_grad = grad_norm / max(theta_norm, 1e-30)
-                    if relative_grad < cfg.plateau_threshold:
-                        bond_lr = lr * cfg.plateau_factor
+                    theta_norm = theta.norm().clamp_min(z_floor)
+                    relative_grad = grad_norm / theta_norm
+                    
+                    boost = torch.where(
+                        relative_grad < cfg.plateau_threshold,
+                        plateau_factor_t,
+                        unit_t,
+                    )
+                    theta = theta - (lr * boost) * grad
+                else:
+                    theta = theta - lr * grad
+                updated = True
 
-                theta = theta - bond_lr * grad
-
-            self.mps.split_and_truncate(
-                k, theta, direction, cfg.max_bond_dim, cfg.svd_cutoff
-            )
+            if updated:
+                self.mps.split_and_truncate(
+                    k, theta, direction, max_bond_dim, cfg.svd_cutoff
+                )
 
             if direction == "right" and k + 1 < num_sites - 1:
                 left_envs[k + 1] = self._update_left_env(left_envs[k], k, configurations)
             elif direction == "left" and k > 0:
                 right_envs[k] = self._update_right_env(right_envs[k + 1], k + 1, configurations)
 
-        return {"max_grad_norm": max_grad}
+        max_grad = (
+            torch.stack(grad_norms).max().item() if grad_norms else 0.0
+        )
+        return {"max_grad_norm": max_grad, "n_skipped_nan": n_skipped_nan}
+    
+    # ------------------------------------------------------------------
+    #  Evaluation
+    # ------------------------------------------------------------------
 
     @torch.no_grad()
     def _evaluate_nll(self, data: torch.Tensor) -> float:
@@ -298,14 +356,37 @@ class DMRGTrainer:
         if cap <= 0 or len(data) <= cap:
             return self.mps.nll(data, batch_size=self.config.batch_size).item()
  
-        idx = torch.randperm(len(data), generator=self._generator)[:cap]
+        idx = self._randperm_like(len(data), data.device)[:cap]
         return self.mps.nll(data[idx], batch_size=self.config.batch_size).item()
     
+    def _randperm_like(self, n: int, device: torch.device) -> torch.Tensor:
+        """Reproducible randperm honoring ``self._generator``."""
+        if self._generator_device.type == device.type:
+            return torch.randperm(n, generator=self._generator, device=device)
+        idx = torch.randperm(
+            n, generator=self._generator, device=self._generator_device
+        )
+        return idx.to(device)
+    
+    # ------------------------------------------------------------------
+    #  Bond-dim schedule
+    # ------------------------------------------------------------------
+    
     def _bond_dim_for_loop(self, loop: int) -> int:
-        sched = self.config.max_bond_dim
-        if callable(sched):
-            return int(sched(loop))
-        return int(sched)
+        sched = self.config.max_bond_dim_schedule
+        if sched is None:
+            return int(self.config.max_bond_dim)
+        value = int(sched(loop))
+        if value < 1:
+            raise ValueError(
+                f"max_bond_dim_schedule returned {value} at loop={loop}; "
+                "must be >= 1"
+            )
+        return value
+    
+    # ------------------------------------------------------------------
+    #  Logging
+    # ------------------------------------------------------------------
     
     def _open_log(self) -> None:
         if self.config.log_path is None:
@@ -315,32 +396,111 @@ class DMRGTrainer:
  
     def _close_log(self) -> None:
         if self._log_file is not None:
-            self._log_file.close()
-            self._log_file = None
+            try:
+                self._log_file.flush()
+            finally:
+                self._log_file.close()
+                self._log_file = None
  
     def _write_log(self, record: Dict) -> None:
         if self._log_file is None:
             return
+        record = {"format_version": _LOG_RECORD_VERSION, **record}
         self._log_file.write(json.dumps(record) + "\n")
         self._log_file.flush()
+
+    # ------------------------------------------------------------------
+    #  Checkpoints (full trainer state, not just MPS)
+    # ------------------------------------------------------------------
  
-    def _maybe_checkpoint(self, loop: int) -> Optional[str]:
+    def _maybe_checkpoint(
+        self,
+        loop: int,
+        lr: float,
+        wait: int,
+        best_metric: float,
+    ) -> Optional[Dict[str, str]]:
         cfg = self.config
         if cfg.checkpoint_every <= 0 or cfg.checkpoint_dir is None:
             return None
         if (loop + 1) % cfg.checkpoint_every != 0:
             return None
+
         cp_dir = Path(cfg.checkpoint_dir)
         cp_dir.mkdir(parents=True, exist_ok=True)
-        path = cp_dir / f"checkpoint_loop_{loop:04d}.pt"
-        self.mps.save(str(path))
-        return str(path)
+        mps_path = cp_dir / f"mps_loop_{loop:04d}.pt"
+        state_path = cp_dir / f"trainer_loop_{loop:04d}.pt"
+
+        self.mps.save(str(mps_path))
+
+        payload = {
+            "format_version": _TRAINER_STATE_VERSION,
+            "loop": loop,
+            "lr": lr,
+            "wait": wait,
+            "best_metric": best_metric,
+            "config": dataclasses.asdict(self._serializable_config()),
+            "generator_state": self._generator.get_state(),
+            "generator_device": self._generator_device.type,
+        }
+        torch.save(payload, str(state_path))
+        return {"mps_path": str(mps_path), "trainer_state_path": str(state_path)}
+    
+    def _serializable_config(self) -> DMRGConfig:
+        """Return a copy of the config with non-picklable fields stripped.
+
+        ``max_bond_dim_schedule`` may be a closure that does not pickle
+        cleanly; we replace it with None in the serialized config and rely
+        on the caller passing the same callable when resuming.
+        """
+        return dataclasses.replace(self.config, max_bond_dim_schedule=None)
+    
+    @classmethod
+    def resume(
+        cls,
+        mps: nn.Module,
+        trainer_state_path: str,
+        max_bond_dim_schedule: Optional[Callable[[int], int]] = None,
+    ) -> Tuple["DMRGTrainer", Dict[str, Any]]:
+        """Reconstruct a trainer from a saved trainer-state file.
+
+        The MPS must be loaded separately (via ``MPS.load``) and passed in.
+        ``max_bond_dim_schedule`` cannot be serialized; pass the same
+        callable used originally if you want to keep the schedule.
+        """
+        payload = torch.load(trainer_state_path, weights_only=True)
+        if payload.get("format_version") != _TRAINER_STATE_VERSION:
+            raise ValueError(
+                f"Unknown trainer-state format_version "
+                f"{payload.get('format_version')!r}; expected "
+                f"{_TRAINER_STATE_VERSION}."
+            )
+
+        cfg_dict = dict(payload["config"])
+        cfg_dict["max_bond_dim_schedule"] = max_bond_dim_schedule
+        cfg = DMRGConfig(**cfg_dict)
+        trainer = cls(mps, cfg)
+        trainer._generator.set_state(payload["generator_state"])
+
+        resume_state: Dict[str, Any] = {
+            "loop_start": int(payload["loop"]) + 1,
+            "lr": float(payload["lr"]),
+            "wait": int(payload["wait"]),
+            "best_metric": float(payload["best_metric"]),
+        }
+        return trainer, resume_state
+    
+    # ------------------------------------------------------------------
+    #  Train loop
+    # ------------------------------------------------------------------
     
     @torch.no_grad()
     def train(
         self,
         train_data: torch.Tensor,
         val_data: Optional[torch.Tensor] = None,
+        *,
+        resume_state: Optional[Dict[str, Any]] = None,
     ) -> List[Dict]:
         cfg = self.config
         num_sites = self.mps.num_sites
@@ -444,62 +604,34 @@ class DMRGTrainer:
  
         return history
 
+# ----------------------------------------------------------------------
+#  Functional entry point
+# ----------------------------------------------------------------------
+
 def dmrg_train(
     mps: nn.Module,
     train_data: torch.Tensor,
     val_data: Optional[torch.Tensor] = None,
     *,
-    max_bond_dim: int = 100,
-    svd_cutoff: float = 1e-8,
-    lr: float = 0.01,
-    num_loops: int = 20,
-    num_descent_steps: int = 1,
-    batch_size: int = 256,
-    lr_shrink: float = 0.5,
-    lr_min: float = 1e-6,
-    patience: int = 5,
-    adaptive_lr: bool = True,
-    plateau_factor: float = 10.0,
-    plateau_threshold: float = 1e-4,
-    batches_per_loop: int = 0,
-    stochastic: bool = False,
-    metric_for_stopping: str = "train_nll",
-    eval_max_samples: int = 2048,
-    seed: Optional[int] = None,
-    checkpoint_every: int = 0,
-    checkpoint_dir: Optional[str] = None,
-    log_path: Optional[str] = None,
-) -> List[Dict]:
-    """
-    Train an MPS Born Machine with DMRG two-site updates.
+    config: Optional[DMRGConfig] = None,
+    **kwargs: Any,
+) -> List[Dict[str, Any]]:
+    """Train an MPS Born Machine with DMRG two-site updates.
 
-    Example:
+    Either pass a fully-built ``config`` or pass any subset of
+    :class:`DMRGConfig` fields as keyword arguments.  ``kwargs`` override
+    fields in ``config`` if both are provided.
+
+    Example
+    -------
         from mps import MPS
         from dmrg_trainer import dmrg_train
 
         model = MPS(num_sites=30, bond_dim=2, physical_dim=2)
         history = dmrg_train(model, train_data, max_bond_dim=60, num_loops=40)
     """
-    config = DMRGConfig(
-        num_descent_steps=num_descent_steps,
-        max_bond_dim=max_bond_dim,
-        svd_cutoff=svd_cutoff,
-        lr=lr,
-        num_loops=num_loops,
-        batch_size=batch_size,
-        lr_shrink=lr_shrink,
-        lr_min=lr_min,
-        patience=patience,
-        adaptive_lr=adaptive_lr,
-        plateau_factor=plateau_factor,
-        plateau_threshold=plateau_threshold,
-        batches_per_loop=batches_per_loop,
-        stochastic=stochastic,
-        metric_for_stopping=metric_for_stopping,
-        eval_max_samples=eval_max_samples,
-        seed=seed,
-        checkpoint_every=checkpoint_every,
-        checkpoint_dir=checkpoint_dir,
-        log_path=log_path,
-    )
+    if config is None:
+        config = DMRGConfig(**kwargs)
+    elif kwargs:
+        config = dataclasses.replace(config, **kwargs)
     return DMRGTrainer(mps, config).train(train_data, val_data)

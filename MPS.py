@@ -985,6 +985,7 @@ class MPS(nn.Module):
         self,
         max_bond_dim: Optional[int] = None,
         cutoff: float = 0.0,
+        preserve_state: bool = True,
     ) -> List[float]:
         """
          Bipartite von Neumann entropy at every bond:
@@ -993,9 +994,22 @@ class MPS(nn.Module):
  
         where σ_i are the singular values at bond k.  Returns ``num_sites - 1`` values.
         """
-        svs = self.left_canonicalize(truncate=True, max_bond_dim=max_bond_dim, cutoff=cutoff)
+        if preserve_state:
+            backup = [p.data.clone() for p in self.site_tensors]
+            try:
+                singular_values = self.left_canonicalize(
+                    truncate=True, max_bond_dim=max_bond_dim, cutoff=cutoff
+                )
+            finally:
+                for p, b in zip(self.site_tensors, backup):
+                    p.data = b
+        else:
+            singular_values = self.left_canonicalize(
+                truncate=True, max_bond_dim=max_bond_dim, cutoff=cutoff
+            )
+
         entropies: List[float] = []
-        for S in svs:
+        for S in singular_values:
             p = S.square()
             p = p / p.sum().clamp_min(self._numerical_floor)
             ent = -(p * p.clamp_min(self._numerical_floor).log()).sum()
@@ -1048,8 +1062,7 @@ class MPS(nn.Module):
         N = self.num_sites
         d = self.physical_dim
  
-        left = self.transfer_environments_left()
-        right = self.transfer_environments_right()
+        left, right = self._cached_environments()
  
         single_S = torch.zeros(N, dtype=torch.float64)
         for k in range(N):
@@ -1102,13 +1115,23 @@ class MPS(nn.Module):
     # ----------------------------------------------------------------------
     
     @torch.no_grad()
-    def sample(self, num_samples: int = 1) -> torch.Tensor:
+    def sample(self, num_samples: int = 1, preserve_state: bool = False) -> torch.Tensor:
         """
         Draw exact, independent samples from P(v) = |Ψ(v)|² / Z.
         """
         if num_samples < 1:
             raise ValueError(f"num_samples must be >= 1, got {num_samples}")
         
+        if preserve_state:
+            backup = [p.data.clone() for p in self.site_tensors]
+            try:
+                return self._sample_left_canonical(num_samples)
+            finally:
+                for p, b in zip(self.site_tensors, backup):
+                    p.data = b
+        return self._sample_left_canonical(num_samples)
+    
+    def _sample_left_canonical(self, num_samples: int) -> torch.Tensor:
         self.left_canonicalize()
  
         device = self.site_tensors[0].device
@@ -1164,6 +1187,7 @@ class MPS(nn.Module):
         known: torch.Tensor,
         mask: torch.Tensor,
         num_samples: int = 1,
+        preserve_state: bool = False,
     ) -> torch.Tensor:
         """
         Conditional sampling: generate completions for partially known
@@ -1183,10 +1207,25 @@ class MPS(nn.Module):
             )
         if mask.dtype != torch.bool:
             raise TypeError(f"mask must have dtype torch.bool, got {mask.dtype}")
-
+        
+        if preserve_state:
+            backup = [p.data.clone() for p in self.site_tensors]
+            try:
+                return self._sample_conditional_dispatch(known, mask, num_samples)
+            finally:
+                for p, b in zip(self.site_tensors, backup):
+                    p.data = b
+        return self._sample_conditional_dispatch(known, mask, num_samples)
  
+    def _sample_conditional_internal(
+        self,
+        known: torch.Tensor,
+        mask: torch.Tensor,
+        num_samples: int = 1,
+    ) -> torch.Tensor:
         N = self.num_sites
         device = self.site_tensors[0].device
+
         known = known.to(device).long()
         mask = mask.to(device)
 

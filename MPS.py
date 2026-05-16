@@ -1,5 +1,5 @@
 import math
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Tuple
 
 import torch
 import torch.nn as nn
@@ -22,6 +22,8 @@ class MPS(nn.Module):
     """
     Matrix Product State with open boundary
     """
+    _LOG_FLOOR: float = 1e-300 
+
     def __init__(
             self,
             num_sites: int,
@@ -249,6 +251,7 @@ class MPS(nn.Module):
     
     @property
     def bond_dims(self) -> List[int]:
+        """Internal bond dimensions, length ``num_sites - 1``."""
         return [self.site_tensors[k].shape[2] for k in range(self.num_sites - 1)]
     
     @property
@@ -258,6 +261,7 @@ class MPS(nn.Module):
 
     @property
     def num_parameters(self) -> int:
+        """Total real parameter count (complex tensors counted as 2 reals)."""
         n = sum(t.numel() for t in self.site_tensors)
         if self.dtype in (torch.complex64, torch.complex128):
             n *= 2
@@ -626,7 +630,7 @@ class MPS(nn.Module):
         if direction == "right":
             self.site_tensors[k].data = U.reshape(D_l, d1, n)
             self.site_tensors[k + 1].data = (S.unsqueeze(1) * Vh).reshape(n, d2, D_r)
-        else:  # "left", already validated above
+        else:
             self.site_tensors[k].data = (U * S.unsqueeze(0)).reshape(D_l, d1, n)
             self.site_tensors[k + 1].data = Vh.reshape(n, d2, D_r)
 
@@ -734,6 +738,28 @@ class MPS(nn.Module):
         return envs
     
     @torch.no_grad()
+    def precompute_environments(self) -> None:
+        """Cache the full left/right transfer environments."""
+        self._cached_left = self.transfer_environments_left()
+        self._cached_right = self.transfer_environments_right()
+        self._cache_valid = True
+
+    @torch.no_grad()
+    def invalidate_environment_cache(self) -> None:
+        """Drop the cached transfer environments."""
+        self._cached_left = None
+        self._cached_right = None
+        self._cache_valid = False
+
+    def _cached_environments(
+        self,
+    ) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
+        """Return cached envs if valid, otherwise build fresh ones (uncached)."""
+        if getattr(self, "_cache_valid", False):
+            return self._cached_left, self._cached_right
+        return self.transfer_environments_left(), self.transfer_environments_right()
+    
+    @torch.no_grad()
     def _open_site_rdm(self, L: torch.Tensor, A: torch.Tensor, R: torch.Tensor) -> torch.Tensor:
         """
         Single-site RDM kernel (un-normalised).
@@ -795,8 +821,7 @@ class MPS(nn.Module):
         """
         self._validate_site(site)
         
-        left = self.transfer_environments_left()
-        right = self.transfer_environments_right()
+        left, right = self._cached_environments()
  
         rdm = self._open_site_rdm(left[site], self.site_tensors[site].data, right[site])
  
@@ -808,8 +833,7 @@ class MPS(nn.Module):
         """
         Single-site RDMs for every site.
         """
-        left = self.transfer_environments_left()
-        right = self.transfer_environments_right()
+        left, right = self._cached_environments()
         rdms: List[torch.Tensor] = []
         for k in range(self.num_sites):
             rdm = self._open_site_rdm(left[k], self.site_tensors[k].data, right[k])
@@ -836,8 +860,7 @@ class MPS(nn.Module):
         
         d = self.physical_dim
  
-        left = self.transfer_environments_left()
-        right = self.transfer_environments_right()
+        left, right = self._cached_environments()
  
         L = left[site_i]
         R = right[site_j]
@@ -850,7 +873,7 @@ class MPS(nn.Module):
             M = self._propagate_M(M, self.site_tensors[m].data)
  
         matrices_j = A_j.permute(1, 0, 2)
-        conj_j     = matrices_j.conj()
+        conj_j = matrices_j.conj()
         AjR = torch.matmul(matrices_j, R)
  
         rdm = torch.zeros(d, d, d, d, dtype=M.dtype, device=M.device)
@@ -885,8 +908,7 @@ class MPS(nn.Module):
  
         lower, higher = min(site_i, site_j), max(site_i, site_j)
  
-        left = self.transfer_environments_left()
-        right = self.transfer_environments_right()
+        left, right = self._cached_environments()
  
         L = left[lower]
         R = right[higher]

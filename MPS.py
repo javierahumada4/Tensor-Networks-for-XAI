@@ -5,6 +5,19 @@ import torch
 import torch.nn as nn
 
 # ----------------------------------------------------------------------
+#  Exceptions
+# ----------------------------------------------------------------------
+
+class MPSError(Exception):
+    """Base class for all MPS errors."""
+
+class MPSShapeError(MPSError, ValueError):
+    """Tensor shape or index does not match the MPS configuration."""
+
+class MPSNumericalError(MPSError, RuntimeError):
+    """A numerical pathology was detected (NaN, overflow, vanishing norm)."""
+
+# ----------------------------------------------------------------------
 #  Checkpoint format
 # ----------------------------------------------------------------------
 
@@ -37,11 +50,11 @@ class MPS(nn.Module):
         super().__init__()
 
         if num_sites < 2:
-            raise ValueError(f"num_sites must be >= 2, got {num_sites}")
+            raise MPSShapeError(f"num_sites must be >= 2, got {num_sites}")
         if bond_dim < 1:
-            raise ValueError(f"bond_dim must be >= 1, got {bond_dim}")
+            raise MPSShapeError(f"bond_dim must be >= 1, got {bond_dim}")
         if physical_dim < 2:
-            raise ValueError(f"physical_dim must be >= 2, got {physical_dim}")
+            raise MPSShapeError(f"physical_dim must be >= 2, got {physical_dim}")
         if dtype not in (torch.float32, torch.float64, torch.complex64, torch.complex128):
             raise TypeError(
                 f"Unsupported dtype: {dtype}. Use float32/float64/complex64/complex128."
@@ -111,17 +124,17 @@ class MPS(nn.Module):
     def _validate_site(self, site: int, name: str = "site") -> None:
         """Check that ``site`` is a valid site index."""
         if not (0 <= site < self.num_sites):
-            raise ValueError(f"{name}={site} out of range [0, {self.num_sites})")
+            raise MPSShapeError(f"{name}={site} out of range [0, {self.num_sites})")
 
     def _validate_configurations(self, configurations: torch.Tensor) -> None:
         """Check shape and value range of a configurations tensor."""
         if configurations.dim() != 2:
-            raise ValueError(
+            raise MPSShapeError(
                 "configurations must be 2D with shape (batch_size, num_sites), "
                 f"got shape {tuple(configurations.shape)}"
             )
         if configurations.shape[1] != self.num_sites:
-            raise ValueError(
+            raise MPSShapeError(
                 f"Expected {self.num_sites} sites, got {configurations.shape[1]}"
             )
         if configurations.numel() == 0:
@@ -129,7 +142,7 @@ class MPS(nn.Module):
         lo = configurations.min().item()
         hi = configurations.max().item()
         if lo < 0 or hi >= self.physical_dim:
-            raise ValueError(
+            raise MPSShapeError(
                 f"configurations values must be in [0, {self.physical_dim}), "
                 f"got range [{lo}, {hi}]"
             )
@@ -139,7 +152,7 @@ class MPS(nn.Module):
     ) -> None:
         """Check SVD truncation hyperparameters."""
         if max_bond_dim is not None and max_bond_dim < 1:
-            raise ValueError(f"max_bond_dim must be >= 1 or None, got {max_bond_dim}")
+            raise MPSShapeError(f"max_bond_dim must be >= 1 or None, got {max_bond_dim}")
         if cutoff < 0:
             raise ValueError(f"cutoff must be >= 0, got {cutoff}")
         
@@ -162,6 +175,35 @@ class MPS(nn.Module):
         if x.is_complex():
             return x.real.square() + x.imag.square()
         return x.square()
+    
+    @staticmethod
+    def _check_valid_probs(
+        probs: torch.Tensor, site: int, ctx: str = "sample"
+    ) -> None:
+        """Verify that ``probs`` is a valid (multinomial-feedable) distribution.
+
+        ``torch.multinomial`` errors out cryptically on non-finite inputs or
+        on distributions whose row-sum is zero; both happen in practice when
+        the MPS has over-/underflowed or has been catastrophically
+        truncated.  We prefer a clear ``MPSNumericalError`` pointing at the
+        actual cause.
+
+        ``probs`` may be 1D (single distribution) or 2D (batch of
+        distributions, one per row).
+        """
+        if not torch.isfinite(probs).all():
+            raise MPSNumericalError(
+                f"Non-finite conditional probabilities at site {site} during "
+                f"{ctx}. The MPS likely under/overflowed; call "
+                f"normalize_state() first or check init_std."
+            )
+        row_sums = probs.sum(dim=-1) if probs.dim() > 1 else probs.sum()
+        if (row_sums <= 0).any():
+            raise MPSNumericalError(
+                f"Degenerate (all-zero) probabilities at site {site} during "
+                f"{ctx}. The MPS state has likely been over-truncated or "
+                "lies in an annihilated subspace for the current conditioning."
+            )
     
     # ------------------------------------------------------------------
     #  Device / dtype movement
@@ -246,7 +288,7 @@ class MPS(nn.Module):
             dtype = raw_dtype
  
         if len(tensors) != config["num_sites"]:
-            raise ValueError(
+            raise MPSShapeError(
                 f"Checkpoint has {len(tensors)} tensors but config "
                 f"declares num_sites={config['num_sites']}"
             )
@@ -487,7 +529,7 @@ class MPS(nn.Module):
         if up_to is None:
             up_to = self.num_sites - 1
         if not (0 <= up_to <= self.num_sites - 1):
-            raise ValueError(
+            raise MPSShapeError(
                 f"up_to={up_to} out of range [0, {self.num_sites - 1}]"
             )
         if truncate:
@@ -545,7 +587,7 @@ class MPS(nn.Module):
         if from_site is None:
             from_site = 1
         if not (1 <= from_site <= self.num_sites):
-            raise ValueError(
+            raise MPSShapeError(
                 f"from_site={from_site} out of range [1, {self.num_sites}]"
             )
         if truncate:
@@ -596,7 +638,7 @@ class MPS(nn.Module):
         """
         """
         if not (0 <= k < self.num_sites - 1):
-            raise ValueError(f"Invalid bond index k={k}; expected 0 <= k < {self.num_sites - 1}")
+            raise MPSShapeError(f"Invalid bond index k={k}; expected 0 <= k < {self.num_sites - 1}")
 
         A_k  = self.site_tensors[k].data
         A_k1 = self.site_tensors[k + 1].data
@@ -618,7 +660,7 @@ class MPS(nn.Module):
         """
         """
         if not (0 <= k < self.num_sites - 1):
-            raise ValueError(
+            raise MPSShapeError(
                 f"Invalid bond index k={k}; expected 0 <= k < {self.num_sites - 1}"
             )
         if direction not in ("right", "left"):
@@ -626,18 +668,18 @@ class MPS(nn.Module):
                 f"direction must be 'right' or 'left', got {direction!r}"
             )
         if theta.dim() != 4:
-            raise ValueError(
+            raise MPSShapeError(
                 f"theta must be rank-4 with shape (D_l, d, d, D_r), got shape {tuple(theta.shape)}"
             )
         D_l, d1, d2, D_r = theta.shape
         if d1 != self.physical_dim or d2 != self.physical_dim:
-            raise ValueError(
+            raise MPSShapeError(
                 f"theta physical dims must be ({self.physical_dim}, {self.physical_dim}), got ({d1}, {d2})"
             )
         expected_D_l = self.site_tensors[k].shape[0]
         expected_D_r = self.site_tensors[k + 1].shape[2]
         if D_l != expected_D_l or D_r != expected_D_r:
-            raise ValueError(
+            raise MPSShapeError(
                 f"theta bond dims ({D_l}, {D_r}) do not match adjacent sites "
                 f"({expected_D_l}, {expected_D_r})"
             )
@@ -667,7 +709,7 @@ class MPS(nn.Module):
         Swap the physical indices of sites k and k+1 in place.
         """
         if not (0 <= k < self.num_sites - 1):
-            raise ValueError(f"Invalid bond index k={k}; expected 0 <= k < {self.num_sites - 1}")
+            raise MPSShapeError(f"Invalid bond index k={k}; expected 0 <= k < {self.num_sites - 1}")
         self._validate_truncation(max_bond_dim, cutoff)
  
         theta = self.merge_sites(k)
@@ -874,7 +916,7 @@ class MPS(nn.Module):
         self._validate_site(site_i, "site_i")
         self._validate_site(site_j, "site_j")
         if site_i >= site_j:
-            raise ValueError(
+            raise MPSShapeError(
                 f"Need site_i < site_j, got ({site_i}, {site_j})"
             )
         
@@ -920,9 +962,9 @@ class MPS(nn.Module):
         self._validate_site(site_i, "site_i")
         self._validate_site(site_j, "site_j")
         if site_i == site_j:
-            raise ValueError("site_i and site_j must differ")
+            raise MPSShapeError("site_i and site_j must differ")
         if not (0 <= value_j < self.physical_dim):
-            raise ValueError(
+            raise MPSShapeError(
                 f"value_j={value_j} out of range [0, {self.physical_dim})"
             )
  
@@ -1054,7 +1096,7 @@ class MPS(nn.Module):
         self._validate_site(site_i, "site_i")
         self._validate_site(site_j, "site_j")
         if site_i == site_j:
-            raise ValueError("site_i and site_j must differ")
+            raise MPSShapeError("site_i and site_j must differ")
 
         lo, hi = min(site_i, site_j), max(site_i, site_j)
  
@@ -1165,6 +1207,7 @@ class MPS(nn.Module):
         sq_norms = self._abs_squared(matrices)
         probs = sq_norms.sum(dim=1)
         probs = probs / probs.sum().clamp_min(self._numerical_floor)
+        self._check_valid_probs(probs, site=N - 1, ctx="sample")
  
         chosen = torch.multinomial(
             probs.unsqueeze(0).expand(num_samples, -1), 1
@@ -1183,6 +1226,7 @@ class MPS(nn.Module):
             sq = self._abs_squared(matrices)
             cond_probs = sq.sum(dim=2)
             cond_probs = cond_probs / cond_probs.sum(dim=1, keepdim=True).clamp_min(self._numerical_floor)
+            self._check_valid_probs(cond_probs, site=k, ctx="sample")
  
             chosen = torch.multinomial(cond_probs, 1).squeeze(1)
             samples[:, k] = chosen
@@ -1209,12 +1253,12 @@ class MPS(nn.Module):
         if num_samples < 1:
             raise ValueError(f"num_samples must be >= 1, got {num_samples}")
         if known.dim() != 1 or known.shape[0] != self.num_sites:
-            raise ValueError(
+            raise MPSShapeError(
                 f"known must be 1D with {self.num_sites} entries, "
                 f"got shape {tuple(known.shape)}"
             )
         if mask.dim() != 1 or mask.shape[0] != self.num_sites:
-            raise ValueError(
+            raise MPSShapeError(
                 f"mask must be 1D with {self.num_sites} entries, "
                 f"got shape {tuple(mask.shape)}"
             )
@@ -1230,7 +1274,7 @@ class MPS(nn.Module):
                     p.data = b
         return self._sample_conditional_dispatch(known, mask, num_samples)
  
-    def _sample_conditional_internal(
+    def _sample_conditional_dispatch(
         self,
         known: torch.Tensor,
         mask: torch.Tensor,
@@ -1247,7 +1291,7 @@ class MPS(nn.Module):
             lo = fixed_vals.min().item()
             hi = fixed_vals.max().item()
             if lo < 0 or hi >= self.physical_dim:
-                raise ValueError(
+                raise MPSShapeError(
                     f"known values at fixed positions must be in "
                     f"[0, {self.physical_dim}), got range [{lo}, {hi}]"
                 )
@@ -1292,6 +1336,7 @@ class MPS(nn.Module):
             sq_norms = self._abs_squared(matrices)
             probs = sq_norms.sum(dim=1)
             probs = probs / probs.sum().clamp_min(self._numerical_floor)
+            self._check_valid_probs(probs, site=N - 1, ctx="sample_conditional_RL")
             chosen = torch.multinomial(
                 probs.unsqueeze(0).expand(num_samples, -1), 1
             ).squeeze(1)
@@ -1311,6 +1356,7 @@ class MPS(nn.Module):
                 sq = self._abs_squared(matrices)
                 cond_probs = sq.sum(dim=2)
                 cond_probs = cond_probs / cond_probs.sum(dim=1, keepdim=True).clamp_min(self._numerical_floor)
+                self._check_valid_probs(cond_probs, site=k, ctx="sample_conditional_RL")
                 chosen = torch.multinomial(cond_probs, 1).squeeze(1)
  
             samples[:, k] = chosen
@@ -1345,6 +1391,7 @@ class MPS(nn.Module):
             sq_norms = self._abs_squared(matrices)
             probs = sq_norms.sum(dim=1)
             probs = probs / probs.sum().clamp_min(self._numerical_floor)
+            self._check_valid_probs(probs, site=0, ctx="sample_conditional_LR")
             chosen = torch.multinomial(
                 probs.unsqueeze(0).expand(num_samples, -1), 1
             ).squeeze(1)
@@ -1364,6 +1411,7 @@ class MPS(nn.Module):
                 sq = self._abs_squared(matrices)
                 cond_probs = sq.sum(dim=2)
                 cond_probs = cond_probs / cond_probs.sum(dim=1, keepdim=True).clamp_min(self._numerical_floor)
+                self._check_valid_probs(cond_probs, site=k, ctx="sample_conditional_LR")
                 chosen = torch.multinomial(cond_probs, 1).squeeze(1)
  
             samples[:, k] = chosen
@@ -1427,6 +1475,7 @@ class MPS(nn.Module):
                     w = w.real
                 w = w.clamp_min(self._numerical_floor)
                 w = w / w.sum(dim=1, keepdim=True).clamp_min(self._numerical_floor)
+                self._check_valid_probs(w, site=k, ctx="sample_conditional_scattered")
                 chosen = torch.multinomial(w, 1).squeeze(1)
  
             samples[:, k] = chosen

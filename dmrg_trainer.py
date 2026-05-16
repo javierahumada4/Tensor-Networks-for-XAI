@@ -130,7 +130,7 @@ class DMRGTrainer:
         Shape: (batch, D_{k-1}).
         """
         batch_size, num_sites = configurations.shape
-        environments = [None] * num_sites
+        environments: List[torch.Tensor] = [None] * num_sites
         environments[0] = torch.ones(batch_size, 1, dtype=self.mps.dtype, device=configurations.device)
 
         for site in range(num_sites - 1):
@@ -148,7 +148,7 @@ class DMRGTrainer:
         Shape: (batch, D_k).
         """
         batch_size, num_sites = configurations.shape
-        environments = [None] * num_sites
+        environments: List[torch.Tensor] = [None] * num_sites
         environments[num_sites - 1] = torch.ones(batch_size, 1, dtype=self.mps.dtype, device=configurations.device)
 
         for site in range(num_sites - 1, 0, -1):
@@ -176,9 +176,16 @@ class DMRGTrainer:
         """
         abs_psi = psi_v.abs()
         small = abs_psi < eps
+        
         if psi_v.is_complex():
-            phase = torch.where(abs_psi > 0, psi_v / abs_psi.clamp_min(eps), torch.ones_like(psi_v))
-            return torch.where(small, phase * eps, psi_v)
+            safe_abs = torch.where(
+                abs_psi > 0, abs_psi, torch.ones_like(abs_psi)
+            )
+            phase = psi_v / safe_abs.to(psi_v.dtype)
+            unit_phase = torch.ones_like(psi_v)
+            phase = torch.where(abs_psi > 0, phase, unit_phase)
+            replacement = phase * eps
+            return torch.where(small, replacement, psi_v)
         else:
             sign = torch.where(psi_v >= 0, torch.ones_like(psi_v), -torch.ones_like(psi_v))
             return torch.where(small, sign * eps, psi_v)

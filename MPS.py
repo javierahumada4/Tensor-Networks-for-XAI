@@ -142,6 +142,26 @@ class MPS(nn.Module):
             raise ValueError(f"max_bond_dim must be >= 1 or None, got {max_bond_dim}")
         if cutoff < 0:
             raise ValueError(f"cutoff must be >= 0, got {cutoff}")
+        
+    # ------------------------------------------------------------------
+    #  Internal helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _as_matrices(A: torch.Tensor) -> torch.Tensor:
+        """
+        Re-index a site tensor as a stack of matrices keyed by physical value.
+        """
+        return A.permute(1, 0, 2)
+    
+    @staticmethod
+    def _abs_squared(x: torch.Tensor) -> torch.Tensor:
+        """
+        ``|x|^2`` for real or complex tensors
+        """
+        if x.is_complex():
+            return x.real.square() + x.imag.square()
+        return x.square()
     
     # ------------------------------------------------------------------
     #  Device / dtype movement
@@ -289,12 +309,12 @@ class MPS(nn.Module):
         
         tensor = self.site_tensors[0]
         values = configurations[:, 0]
-        env = tensor[:, values, :].permute(1, 0, 2)
+        env = self._as_matrices(tensor[:, values, :])
 
         for site in range(1, self.num_sites):
             tensor = self.site_tensors[site]
             values = configurations[:, site]
-            selected_matrices = tensor[:, values, :].permute(1, 0, 2)
+            selected_matrices = self._as_matrices(tensor[:, values, :])
 
             env = torch.bmm(env, selected_matrices)
 
@@ -313,7 +333,7 @@ class MPS(nn.Module):
  
         tensor = self.site_tensors[0]
         values = configurations[:, 0]
-        env = tensor[:, values, :].permute(1, 0, 2).squeeze(1)
+        env = self._as_matrices(tensor[:, values, :]).squeeze(1)
  
         log_scale = torch.zeros(batch_size, dtype=torch.float64, device=device)
  
@@ -324,7 +344,7 @@ class MPS(nn.Module):
         for site in range(1, self.num_sites):
             tensor = self.site_tensors[site]
             values = configurations[:, site]
-            selected_matrices = tensor[:, values, :].permute(1, 0, 2)
+            selected_matrices = self._as_matrices(tensor[:, values, :])
             env = torch.bmm(env.unsqueeze(1), selected_matrices).squeeze(1)
  
             env_abs_max = env.abs().amax(dim=1).clamp_min(self._numerical_floor)
@@ -355,7 +375,7 @@ class MPS(nn.Module):
 
         for site in range(self.num_sites):
             tensor = self.site_tensors[site]
-            matrices = tensor.permute(1, 0, 2)
+            matrices = self._as_matrices(tensor)
 
             contracted = torch.matmul(env, matrices)
             matrices_dagger = matrices.conj().transpose(1, 2)
@@ -701,14 +721,14 @@ class MPS(nn.Module):
     
     @torch.no_grad()
     def _apply_transfer_left(self, L: torch.Tensor, A: torch.Tensor) -> torch.Tensor:
-        matrices = A.permute(1, 0, 2)
+        matrices = self._as_matrices(A)
         L_times_conj = torch.matmul(L, matrices.conj())
         per_s = torch.matmul(matrices.transpose(1, 2), L_times_conj)
         return per_s.sum(dim = 0)
     
     @torch.no_grad()
     def _apply_transfer_right(self, R: torch.Tensor, A: torch.Tensor) -> torch.Tensor:
-        matrices = A.permute(1, 0, 2)
+        matrices = self._as_matrices(A)
         M_times_R = torch.matmul(matrices, R)
         per_s = torch.matmul(M_times_R, matrices.conj().transpose(1, 2))
         return per_s.sum(dim = 0)
@@ -765,7 +785,7 @@ class MPS(nn.Module):
         Single-site RDM kernel (un-normalised).
         """
         physical_dim = A.shape[1]
-        matrices = A.permute(1, 0, 2)
+        matrices = self._as_matrices(A)
 
         temp = torch.matmul(torch.matmul(L.transpose(0, 1), matrices), R)
         conj_flat = matrices.conj().reshape(physical_dim, -1)
@@ -778,7 +798,7 @@ class MPS(nn.Module):
         """
         First step of two-site RDM: leave one physical index pair open.
         """
-        matrices = A.permute(1, 0, 2)
+        matrices = self._as_matrices(A)
         conj = matrices.conj()
         LA = torch.matmul(L.transpose(0, 1), matrices)
         return torch.matmul(LA.permute(0, 2, 1).unsqueeze(1), conj.unsqueeze(0))
@@ -793,7 +813,7 @@ class MPS(nn.Module):
         physical_dim = A.shape[1]
         bond_dim_right = A.shape[2]
 
-        matrices = A.permute(1, 0, 2)
+        matrices = self._as_matrices(A)
         conj = matrices.conj()
 
         M_flat = M.reshape(rdm_dim * rdm_dim, M.shape[2], M.shape[3])
@@ -872,7 +892,7 @@ class MPS(nn.Module):
         for m in range(site_i + 1, site_j):
             M = self._propagate_M(M, self.site_tensors[m].data)
  
-        matrices_j = A_j.permute(1, 0, 2)
+        matrices_j = self._as_matrices(A_j)
         conj_j = matrices_j.conj()
         AjR = torch.matmul(matrices_j, R)
  
@@ -1086,7 +1106,7 @@ class MPS(nn.Module):
  
                 A_j = self.site_tensors[j].data
                 R = right[j]
-                matrices_j = A_j.permute(1, 0, 2)
+                matrices_j = self._as_matrices(A_j)
                 conj_j = matrices_j.conj()
                 AjR = torch.matmul(matrices_j, R)
  
@@ -1136,17 +1156,13 @@ class MPS(nn.Module):
  
         device = self.site_tensors[0].device
         N = self.num_sites
-        is_complex = self.dtype in (torch.complex64, torch.complex128)
  
         samples = torch.zeros(num_samples, N, dtype=torch.long, device=device)
  
         A_last = self.site_tensors[N - 1].data
-        matrices = A_last.permute(1, 0, 2).squeeze(2)
+        matrices = self._as_matrices(A_last).squeeze(2)
  
-        if is_complex:
-            sq_norms = matrices.real.square() + matrices.imag.square()
-        else:
-            sq_norms = matrices.square()
+        sq_norms = self._abs_squared(matrices)
         probs = sq_norms.sum(dim=1)
         probs = probs / probs.sum().clamp_min(self._numerical_floor)
  
@@ -1159,15 +1175,12 @@ class MPS(nn.Module):
  
         for k in range(N - 2, -1, -1):
             A_k = self.site_tensors[k].data
-            mats = A_k.permute(1, 0, 2)
+            mats = self._as_matrices(A_k)
  
             candidates = torch.matmul(mats, x.T)
             candidates = candidates.permute(2, 0, 1)
  
-            if is_complex:
-                sq = candidates.real.square() + candidates.imag.square()
-            else:
-                sq = candidates.square()
+            sq = self._abs_squared(matrices)
             cond_probs = sq.sum(dim=2)
             cond_probs = cond_probs / cond_probs.sum(dim=1, keepdim=True).clamp_min(self._numerical_floor)
  
@@ -1267,20 +1280,16 @@ class MPS(nn.Module):
  
         device = self.site_tensors[0].device
         N = self.num_sites
-        is_complex = self.dtype in (torch.complex64, torch.complex128)
  
         samples = torch.zeros(num_samples, N, dtype=torch.long, device=device)
  
         A_last = self.site_tensors[N - 1].data
-        matrices = A_last.permute(1, 0, 2).squeeze(2)
+        matrices = self._as_matrices(A_last).squeeze(2)
  
         if mask[N - 1]:
             chosen = known[N - 1].expand(num_samples)
         else:
-            if is_complex:
-                sq_norms = matrices.real.square() + matrices.imag.square()
-            else:
-                sq_norms = matrices.square()
+            sq_norms = self._abs_squared(matrices)
             probs = sq_norms.sum(dim=1)
             probs = probs / probs.sum().clamp_min(self._numerical_floor)
             chosen = torch.multinomial(
@@ -1292,17 +1301,14 @@ class MPS(nn.Module):
  
         for k in range(N - 2, -1, -1):
             A_k = self.site_tensors[k].data
-            mats = A_k.permute(1, 0, 2)
+            mats = self._as_matrices(A_k)
  
             candidates = torch.matmul(mats, x.T).permute(2, 0, 1)
  
             if mask[k]:
                 chosen = known[k].expand(num_samples)
             else:
-                if is_complex:
-                    sq = candidates.real.square() + candidates.imag.square()
-                else:
-                    sq = candidates.square()
+                sq = self._abs_squared(matrices)
                 cond_probs = sq.sum(dim=2)
                 cond_probs = cond_probs / cond_probs.sum(dim=1, keepdim=True).clamp_min(self._numerical_floor)
                 chosen = torch.multinomial(cond_probs, 1).squeeze(1)
@@ -1327,20 +1333,16 @@ class MPS(nn.Module):
  
         device = self.site_tensors[0].device
         N = self.num_sites
-        is_complex = self.dtype in (torch.complex64, torch.complex128)
  
         samples = torch.zeros(num_samples, N, dtype=torch.long, device=device)
  
         A_first = self.site_tensors[0].data
-        matrices = A_first.permute(1, 0, 2).squeeze(1)
+        matrices = self._as_matrices(A_first).squeeze(1)
  
         if mask[0]:
             chosen = known[0].expand(num_samples)
         else:
-            if is_complex:
-                sq_norms = matrices.real.square() + matrices.imag.square()
-            else:
-                sq_norms = matrices.square()
+            sq_norms = self._abs_squared(matrices)
             probs = sq_norms.sum(dim=1)
             probs = probs / probs.sum().clamp_min(self._numerical_floor)
             chosen = torch.multinomial(
@@ -1352,17 +1354,14 @@ class MPS(nn.Module):
  
         for k in range(1, N):
             A_k = self.site_tensors[k].data
-            mats = A_k.permute(1, 0, 2)
+            mats = self._as_matrices(A_k)
  
             candidates = torch.einsum('sa,vab->svb', x, mats)
  
             if mask[k]:
                 chosen = known[k].expand(num_samples)
             else:
-                if is_complex:
-                    sq = candidates.real.square() + candidates.imag.square()
-                else:
-                    sq = candidates.square()
+                sq = self._abs_squared(matrices)
                 cond_probs = sq.sum(dim=2)
                 cond_probs = cond_probs / cond_probs.sum(dim=1, keepdim=True).clamp_min(self._numerical_floor)
                 chosen = torch.multinomial(cond_probs, 1).squeeze(1)
@@ -1392,7 +1391,7 @@ class MPS(nn.Module):
  
         for k in range(N - 1, 0, -1):
             A_k = self.site_tensors[k].data
-            mats = A_k.permute(1, 0, 2)
+            mats = self._as_matrices(A_k)
             R_next = right_masked[k]
  
             if mask[k]:
@@ -1411,7 +1410,7 @@ class MPS(nn.Module):
  
         for k in range(N):
             A_k = self.site_tensors[k].data
-            mats = A_k.permute(1, 0, 2)
+            mats = self._as_matrices(A_k)
             R_next = right_masked[k]
  
             candidates = torch.einsum('sa,vab->svb', x, mats)

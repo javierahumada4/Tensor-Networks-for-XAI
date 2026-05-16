@@ -1,15 +1,27 @@
 import math
-from typing import Optional, List
+from typing import Optional, List, Dict
 
 import torch
 import torch.nn as nn
+
+# ----------------------------------------------------------------------
+#  Checkpoint format
+# ----------------------------------------------------------------------
+
+_CHECKPOINT_FORMAT_VERSION: int = 2
+
+_DTYPE_MAP: Dict[str, torch.dtype] = {
+        "float32": torch.float32,
+        "float64": torch.float64,
+        "complex64": torch.complex64,
+        "complex128": torch.complex128,
+    }
+_REVERSE_DTYPE_MAP: Dict[torch.dtype, str] = {value: key for key, value in _DTYPE_MAP.items()}
 
 class MPS(nn.Module):
     """
     Matrix Product State with open boundary
     """
-    _LOG_FLOOR: float = 1e-300
-
     def __init__(
             self,
             num_sites: int,
@@ -17,6 +29,8 @@ class MPS(nn.Module):
             physical_dim: int = 2,
             dtype: torch.dtype = torch.float32,
             init_std: Optional[float] = None,
+            *,
+            _skip_init: bool = False,
     ) -> None:
         super().__init__()
 
@@ -36,7 +50,10 @@ class MPS(nn.Module):
         self.physical_dim = physical_dim
         self.dtype = dtype
 
-        self.site_tensors = self._normal_init(init_std)
+        if _skip_init:
+            self.site_tensors = self._empty_init()
+        else:
+            self.site_tensors = self._normal_init(init_std)
 
     def _randn(self, *shape) -> torch.Tensor:
         """
@@ -66,6 +83,21 @@ class MPS(nn.Module):
             tensor_list.append(nn.Parameter(bulk_tensor))
 
         right_tensor = self._randn(self.bond_dim, self.physical_dim, 1) * init_std
+        tensor_list.append(nn.Parameter(right_tensor))
+
+        return nn.ParameterList(tensor_list)
+    
+    def _empty_init(self) -> torch.Tensor:
+        tensor_list: List[nn.Parameter] = []
+
+        left_tensor = torch.zeros(1, self.physical_dim, self.bond_dim, dtype=self.dtype)
+        tensor_list.append(nn.Parameter(left_tensor))
+
+        for _ in range(1, self.num_sites-1):
+            bulk_tensor = torch.zeros(self.bond_dim, self.physical_dim, self.bond_dim, dtype=self.dtype)
+            tensor_list.append(nn.Parameter(bulk_tensor))
+
+        right_tensor = torch.zeros(self.bond_dim, self.physical_dim, 1, dtype=self.dtype)
         tensor_list.append(nn.Parameter(right_tensor))
 
         return nn.ParameterList(tensor_list)
@@ -108,6 +140,10 @@ class MPS(nn.Module):
             raise ValueError(f"max_bond_dim must be >= 1 or None, got {max_bond_dim}")
         if cutoff < 0:
             raise ValueError(f"cutoff must be >= 0, got {cutoff}")
+    
+    # ------------------------------------------------------------------
+    #  Device / dtype movement
+    # ------------------------------------------------------------------
         
     def to(self, *args, **kwargs):
         """
@@ -130,9 +166,12 @@ class MPS(nn.Module):
             self_is_complex = self.dtype in (torch.complex64, torch.complex128)
             new_is_complex = new_dtype in (torch.complex64, torch.complex128)
             if self_is_complex != new_is_complex:
-                new_dtype = None
-            else:
-                self.dtype = new_dtype
+                raise TypeError(
+                    f"Cannot change between real and complex dtype via .to() "
+                    f"({self.dtype!r} -> {new_dtype!r}). "
+                    "Construct a new MPS instead."
+                )
+            self.dtype = new_dtype
  
         rebuilt_kwargs = dict(kwargs)
         if new_dtype is not None:
@@ -141,18 +180,22 @@ class MPS(nn.Module):
             rebuilt_kwargs["device"] = new_device
         return super().to(*positional, **rebuilt_kwargs)
     
+    # ------------------------------------------------------------------
+    #  Persistence
+    # ------------------------------------------------------------------
+    
     def save(self, path: str) -> None:
         """
         Serialise the full MPS (config + site tensors) to disk.
         """
         torch.save(
             {
-                "format_version": 1,
+                "format_version": _CHECKPOINT_FORMAT_VERSION,
                 "config": {
                     "num_sites": self.num_sites,
                     "bond_dim": self.bond_dim,
                     "physical_dim": self.physical_dim,
-                    "dtype": self.dtype,
+                    "dtype": _REVERSE_DTYPE_MAP[self.dtype],
                 },
                 "tensors": [t.detach().cpu().clone() for t in self.site_tensors],
             },
@@ -164,14 +207,21 @@ class MPS(nn.Module):
         """
         Reconstruct an MPS previously saved with :meth:`save`.
         """
-        ckpt = torch.load(path, map_location=map_location, weights_only=False)
-        if "format_version" not in ckpt or ckpt["format_version"] != 1:
+        ckpt = torch.load(path, map_location=map_location, weights_only=True)
+        version = ckpt.get("format_version")
+        if version not in (1, _CHECKPOINT_FORMAT_VERSION):
             raise ValueError(
-                f"Unrecognised checkpoint format at {path!r}; "
-                "expected format_version=1."
+                f"Unrecognised checkpoint format_version={version!r} at "
+                f"{path!r}; supported: 1, {_CHECKPOINT_FORMAT_VERSION}."
             )
         config = ckpt["config"]
         tensors: List[torch.Tensor] = ckpt["tensors"]
+
+        raw_dtype = config["dtype"]
+        if isinstance(raw_dtype, str):
+            dtype = _DTYPE_MAP[raw_dtype]
+        else:
+            dtype = raw_dtype
  
         if len(tensors) != config["num_sites"]:
             raise ValueError(
@@ -183,12 +233,13 @@ class MPS(nn.Module):
             num_sites=config["num_sites"],
             bond_dim=config["bond_dim"],
             physical_dim=config["physical_dim"],
-            dtype=config["dtype"],
+            dtype=dtype,
+            _skip_init=True,
         )
 
-        model.site_tensors = nn.ParameterList(
-            [nn.Parameter(t.to(config["dtype"])) for t in tensors]
-        )
+        for dst, src in zip(model.site_tensors, tensors):
+            src_on_device = src.to(device=dst.device, dtype=dtype)
+            dst.data = src_on_device.clone()
         return model
  
     

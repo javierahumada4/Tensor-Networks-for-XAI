@@ -1,5 +1,6 @@
 import dataclasses
 import json
+import logging
 import math
 import time
 from dataclasses import dataclass
@@ -8,6 +9,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
+
+logger = logging.getLogger(__name__)
 
 _LOG_RECORD_VERSION: int = 1
 _TRAINER_STATE_VERSION: int = 1
@@ -503,15 +506,175 @@ class DMRGTrainer:
         resume_state: Optional[Dict[str, Any]] = None,
     ) -> List[Dict]:
         cfg = self.config
+        train_data, val_data = self._prepare_data(train_data, val_data)
+
+        metric = cfg.metric_for_stopping
+        if metric == "val_nll" and val_data is None:
+            metric = "train_nll"
+
+        self.mps.right_canonicalize()
+
+        if resume_state is not None:
+            loop_start = resume_state["loop_start"]
+            lr = resume_state["lr"]
+            wait = resume_state["wait"]
+            best_metric = resume_state["best_metric"]
+        else:
+            loop_start = 0
+            lr = cfg.lr
+            wait = 0
+            best_metric = float("inf")
+
+        history: List[Dict] = []
+
+        if cfg.batches_per_loop > 0:
+            n_batches = cfg.batches_per_loop
+        else:
+            n_batches = max(1, (len(train_data) + cfg.batch_size - 1) // cfg.batch_size)
+
+        natural_batches_per_epoch = max(
+            1, (len(train_data) + cfg.batch_size - 1) // cfg.batch_size
+        )
+
+        self._open_log()
+        t_start = time.monotonic()
+
+        try:
+            for loop in range(loop_start, cfg.num_loops):
+                t_loop_start = time.monotonic()
+                max_bond_dim = self._bond_dim_for_loop(loop)
+
+                perm = self._randperm_like(len(train_data), train_data.device)
+                stochastic_max_grad = 0.0
+                n_skipped_nan = 0
+
+                for b in range(n_batches):
+                    if b > 0 and b % natural_batches_per_epoch == 0:
+                        perm = self._randperm_like(
+                            len(train_data), train_data.device
+                        )
+
+                    start = (b % natural_batches_per_epoch) * cfg.batch_size
+                    idx = perm[start:start + cfg.batch_size]
+                    if len(idx) < 2:
+                        continue
+                    batch = train_data[idx]
+
+                    left_envs = self._build_left_envs(batch)
+                    right_envs = self._build_right_envs(batch)
+                    stats_r = self._sweep(batch, "right", lr,left_envs, right_envs, max_bond_dim)
+
+                    left_envs = self._build_left_envs(batch)
+                    right_envs = self._build_right_envs(batch)
+                    stats_l = self._sweep(batch, "left", lr, left_envs, right_envs, max_bond_dim)
+
+                    stochastic_max_grad = max(stochastic_max_grad, stats_r["max_grad_norm"], stats_l["max_grad_norm"])
+
+                    n_skipped_nan += (
+                        stats_r["n_skipped_nan"] + stats_l["n_skipped_nan"]
+                    )
+
+                    if cfg.stochastic:
+                            break
+                    
+                if n_skipped_nan > 0:
+                    logger.warning(
+                        "loop %d: skipped %d non-finite gradient updates.",
+                        loop, n_skipped_nan,
+                    )
+    
+                train_nll = self._evaluate_nll(train_data)
+    
+                record: Dict[str, Any] = {
+                    "loop": loop,
+                    "train_nll": train_nll,
+                    "lr": lr,
+                    "bond_dims": list(self.mps.bond_dims),
+                    "max_bond_dim_cap": max_bond_dim,
+                    "max_grad_norm": stochastic_max_grad,
+                    "n_skipped_nan": n_skipped_nan,
+                    "elapsed_s": time.monotonic() - t_loop_start,
+                    "wallclock_s": time.monotonic() - t_start,
+                }
+                if val_data is not None:
+                    record["val_nll"] = self._evaluate_nll(val_data)
+    
+                cp_paths = self._maybe_checkpoint(loop, lr, wait, best_metric)
+                if cp_paths is not None:
+                    record.update(cp_paths)
+    
+                history.append(record)
+                self._write_log(record)
+
+                logger.info(
+                    "loop %d/%d  train_nll=%.4f  lr=%.2e  max_grad=%.2e  bond_dims=%s",
+                    loop, cfg.num_loops - 1, train_nll, lr,
+                    stochastic_max_grad, self.mps.bond_dims,
+                )
+
+                if not math.isfinite(train_nll):
+                    logger.error(
+                        "loop %d: train_nll is non-finite (%s). "
+                        "Aborting; the model has diverged.",
+                        loop, train_nll,
+                    )
+                    break
+    
+                monitor_value = record.get(metric, train_nll)
+                if monitor_value < best_metric - cfg.improvement_threshold:
+                    best_metric = monitor_value
+                    wait = 0
+                else:
+                    wait += 1
+                    if wait >= cfg.patience:
+                        lr *= cfg.lr_shrink
+                        wait = 0
+                        if lr < cfg.lr_min:
+                            logger.info(
+                                "lr %.2e fell below lr_min %.2e; "
+                                "stopping early.", lr, cfg.lr_min,
+                            )
+                            break
+        finally:
+            self._close_log()
+
+        return history
+    
+            
+    
+    # ------------------------------------------------------------------
+    #  Internal helpers
+    # ------------------------------------------------------------------
+
+    def _prepare_data(
+        self,
+        train_data: torch.Tensor,
+        val_data: Optional[torch.Tensor],
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         num_sites = self.mps.num_sites
+        if train_data.dim() != 2:
+            raise ValueError(
+                f"train_data must be 2D (batch, num_sites), "
+                f"got shape {tuple(train_data.shape)}"
+            )
         if train_data.shape[1] != num_sites:
             raise ValueError(
                 f"train_data has {train_data.shape[1]} sites, expected {num_sites}"
+            )
+        if len(train_data) < 2:
+            raise ValueError(
+                f"train_data has {len(train_data)} samples; DMRG needs at "
+                "least 2 to form a usable minibatch."
             )
 
         device = next(self.mps.parameters()).device
         train_data = train_data.to(device)
         if val_data is not None:
+            if val_data.dim() != 2:
+                raise ValueError(
+                    f"val_data must be 2D (batch, num_sites), "
+                    f"got shape {tuple(val_data.shape)}"
+                )
             if val_data.shape[1] != num_sites:
                 raise ValueError(
                     f"val_data has {val_data.shape[1]} sites, expected {num_sites}"
@@ -521,88 +684,7 @@ class DMRGTrainer:
             train_data = train_data.long()
         if val_data is not None and val_data.dtype != torch.long:
             val_data = val_data.long()
-
-        metric = cfg.metric_for_stopping
-        if metric == "val_nll" and val_data is None:
-            metric = "train_nll"
-
-        self.mps.left_canonicalize()
-        self.mps.right_canonicalize()
-
-        lr = cfg.lr
-        best_metric = float('inf')
-        wait = 0
-        history: List[Dict] = []
-
-        if cfg.batches_per_loop > 0:
-            n_batches = cfg.batches_per_loop
-        else:
-            n_batches = max(1, (len(train_data) + cfg.batch_size - 1) // cfg.batch_size)
-
-        self._open_log()
-        t_start = time.time()
-
-        for loop in range(cfg.num_loops):
-            t_loop_start = time.time()
-            max_bond_dim = self._bond_dim_for_loop(loop)
-
-            perm = torch.randperm(len(train_data), device=device)
-            stochastic_max_grad = 0.0
-            for b in range(n_batches):
-                start = (b * cfg.batch_size) % len(train_data)
-                idx = perm[start:start + cfg.batch_size]
-                if len(idx) < 2:
-                    continue
-                batch = train_data[idx]
-
-                left_env = self._build_left_envs(batch)
-                right_env = self._build_right_envs(batch)
-                stats_r = self._sweep(batch, "right", lr, left_env, right_env)
-
-                left_env = self._build_left_envs(batch)
-                right_env = self._build_right_envs(batch)
-                stats_l = self._sweep(batch, "left", lr, left_env, right_env)
-
-                stochastic_max_grad = max(stochastic_max_grad, stats_r["max_grad_norm"], stats_l["max_grad_norm"])
-
-                if cfg.stochastic:
-                        break
- 
-            train_nll = self._evaluate_nll(train_data)
- 
-            record: Dict = {
-                    "loop": loop,
-                    "train_nll": train_nll,
-                    "lr": lr,
-                    "bond_dims": list(self.mps.bond_dims),
-                    "max_bond_dim_cap": max_bond_dim,
-                    "max_grad_norm": stochastic_max_grad,
-                    "elapsed_s": time.time() - t_loop_start,
-                    "wallclock_s": time.time() - t_start,
-                }
-            if val_data is not None:
-                record["val_nll"] = self._evaluate_nll(val_data)
- 
-            cp_path = self._maybe_checkpoint(loop)
-            if cp_path is not None:
-                record["checkpoint_path"] = cp_path
- 
-            history.append(record)
-            self._write_log(record)
- 
-            monitor_value = record.get(metric, train_nll)
-            if monitor_value < best_metric - 1e-4:
-                best_metric = monitor_value
-                wait = 0
-            else:
-                wait += 1
-                if wait >= cfg.patience:
-                    lr *= cfg.lr_shrink
-                    wait = 0
-                    if lr < cfg.lr_min:
-                        break
- 
-        return history
+        return train_data, val_data
 
 # ----------------------------------------------------------------------
 #  Functional entry point

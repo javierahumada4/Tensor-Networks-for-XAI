@@ -884,21 +884,11 @@ class MPS(nn.Module):
         Propagate the open two-index tensor M through an intermediate site
         by tracing over its physical index (transfer matrix).
         """
-        rdm_dim = M.shape[0]
-        physical_dim = A.shape[1]
-        bond_dim_right = A.shape[2]
-
         matrices = self._as_matrices(A)
-        conj = matrices.conj()
 
-        M_flat = M.reshape(rdm_dim * rdm_dim, M.shape[2], M.shape[3])
-        M_new = torch.zeros(rdm_dim * rdm_dim, bond_dim_right, bond_dim_right, dtype=M.dtype, device=M.device)
-
-        for p in range(physical_dim):
-            temp = torch.matmul(M_flat, conj[p]) 
-            M_new = M_new + torch.matmul(matrices[p].T, temp) 
-        
-        return M_new.reshape(rdm_dim, rdm_dim, bond_dim_right, bond_dim_right)
+        return torch.einsum(
+            "pca,xycd,pdb->xyab", matrices, M, matrices.conj()
+        )
 
     # ----------------------------------------------------------------------
     # Reduced density matrices: public API
@@ -971,13 +961,9 @@ class MPS(nn.Module):
         conj_j = matrices_j.conj()
         AjR = torch.matmul(matrices_j, R)
  
-        rdm = torch.zeros(d, d, d, d, dtype=M.dtype, device=M.device)
-        for ti in range(d):
-            for tj in range(d):
-                temp = torch.matmul(M[:, ti], conj_j[tj])
-                rdm[:, :, ti, tj] = torch.matmul(temp.reshape(d, -1), AjR.reshape(d, -1).T)
+        rdm = torch.einsum("xyab,sac,tbc->xsyt", M, AjR, conj_j)
  
-        trace = sum(rdm[s, t, s, t] for s in range(d) for t in range(d)).real.clamp_min(self._numerical_floor)
+        trace = torch.einsum("stst->", rdm).real.clamp_min(self._numerical_floor)
         return rdm / trace
     
     @torch.no_grad()
@@ -1185,14 +1171,11 @@ class MPS(nn.Module):
                 conj_j = matrices_j.conj()
                 AjR = torch.matmul(matrices_j, R)
  
-                rdm = torch.zeros(d, d, d, d, dtype=M.dtype, device=M.device)
-                for ti in range(d):
-                    for tj in range(d):
-                        temp = torch.matmul(M[:, ti], conj_j[tj])
-                        rdm[:, :, ti, tj] = torch.matmul(
-                            temp.reshape(d, -1), AjR.reshape(d, -1).T
-                        )
-                trace = sum(rdm[s, t, s, t] for s in range(d) for t in range(d)).real.clamp_min(self._numerical_floor)
+                rdm = torch.einsum("xyab,sac,tbc->xsyt", M, AjR, conj_j)
+
+                trace = torch.einsum("stst->", rdm).real.clamp_min(
+                    self._numerical_floor
+                )
                 rdm = rdm / trace
  
                 rho_matrix = rdm.reshape(d * d, d * d)

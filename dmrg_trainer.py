@@ -504,12 +504,16 @@ class DMRGTrainer:
         val_data: Optional[torch.Tensor] = None,
         *,
         resume_state: Optional[Dict[str, Any]] = None,
-    ) -> List[Dict]:
+    ) -> List[Dict[str, Any]]:
         cfg = self.config
         train_data, val_data = self._prepare_data(train_data, val_data)
 
         metric = cfg.metric_for_stopping
         if metric == "val_nll" and val_data is None:
+            logger.warning(
+                "metric_for_stopping='val_nll' but val_data is None; "
+                "falling back to 'train_nll'."
+            )
             metric = "train_nll"
 
         self.mps.right_canonicalize()

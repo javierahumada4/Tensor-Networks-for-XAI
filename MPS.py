@@ -38,7 +38,9 @@ class MPS(nn.Module):
     """
     Matrix Product State with open boundary
     """
-    _LOG_FLOOR: float = 1e-300 
+    _LOG_FLOOR: float = 1e-300
+
+    _discarded_weight_warn_threshold: float = 0.1
 
     def __init__(
             self,

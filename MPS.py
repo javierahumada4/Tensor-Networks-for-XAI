@@ -144,12 +144,12 @@ class MPS(nn.Module):
             )
         if configurations.numel() == 0:
             return
-        lo = configurations.min().item()
-        hi = configurations.max().item()
-        if lo < 0 or hi >= self.physical_dim:
+        min_value = configurations.min().item()
+        max_value = configurations.max().item()
+        if min_value < 0 or max_value >= self.physical_dim:
             raise MPSShapeError(
                 f"configurations values must be in [0, {self.physical_dim}), "
-                f"got range [{lo}, {hi}]"
+                f"got range [{min_value}, {max_value}]"
             )
 
     def _validate_truncation(
@@ -182,8 +182,8 @@ class MPS(nn.Module):
         return x.square()
     
     @staticmethod
-    def _check_valid_probs(
-        probs: torch.Tensor, site: int, ctx: str = "sample"
+    def _check_valid_probabilities(
+        probabilities: torch.Tensor, site: int, context: str = "sample"
     ) -> None:
         """Verify that ``probs`` is a valid (multinomial-feedable) distribution.
 
@@ -196,17 +196,17 @@ class MPS(nn.Module):
         ``probs`` may be 1D (single distribution) or 2D (batch of
         distributions, one per row).
         """
-        if not torch.isfinite(probs).all():
+        if not torch.isfinite(probabilities).all():
             raise MPSNumericalError(
                 f"Non-finite conditional probabilities at site {site} during "
-                f"{ctx}. The MPS likely under/overflowed; call "
+                f"{context}. The MPS likely under/overflowed; call "
                 f"normalize_state() first or check init_std."
             )
-        row_sums = probs.sum(dim=-1) if probs.dim() > 1 else probs.sum()
+        row_sums = probabilities.sum(dim=-1) if probabilities.dim() > 1 else probabilities.sum()
         if (row_sums <= 0).any():
             raise MPSNumericalError(
                 f"Degenerate (all-zero) probabilities at site {site} during "
-                f"{ctx}. The MPS state has likely been over-truncated or "
+                f"{context}. The MPS state has likely been over-truncated or "
                 "lies in an annihilated subspace for the current conditioning."
             )
     
@@ -221,15 +221,15 @@ class MPS(nn.Module):
         new_dtype: Optional[torch.dtype] = kwargs.pop("dtype", None)
         new_device = kwargs.pop("device", None)
         positional: List = []
-        for a in args:
-            if isinstance(a, torch.dtype):
+        for argument in args:
+            if isinstance(argument, torch.dtype):
                 if new_dtype is None:
-                    new_dtype = a
-            elif isinstance(a, (torch.device, str)):
+                    new_dtype = argument
+            elif isinstance(argument, (torch.device, str)):
                 if new_device is None:
-                    new_device = a
+                    new_device = argument
             else:
-                positional.append(a)
+                positional.append(argument)
  
         if new_dtype is not None:
             self_is_complex = self.dtype in (torch.complex64, torch.complex128)
@@ -266,7 +266,7 @@ class MPS(nn.Module):
                     "physical_dim": self.physical_dim,
                     "dtype": _REVERSE_DTYPE_MAP[self.dtype],
                 },
-                "tensors": [t.detach().cpu().clone() for t in self.site_tensors],
+                "tensors": [site_tensor.detach().cpu().clone() for site_tensor in self.site_tensors],
             },
             path,
         )
@@ -276,15 +276,15 @@ class MPS(nn.Module):
         """
         Reconstruct an MPS previously saved with :meth:`save`.
         """
-        ckpt = torch.load(path, map_location=map_location, weights_only=True)
-        version = ckpt.get("format_version")
+        checkpoint = torch.load(path, map_location=map_location, weights_only=True)
+        version = checkpoint.get("format_version")
         if version not in (1, _CHECKPOINT_FORMAT_VERSION):
             raise ValueError(
                 f"Unrecognised checkpoint format_version={version!r} at "
                 f"{path!r}; supported: 1, {_CHECKPOINT_FORMAT_VERSION}."
             )
-        config = ckpt["config"]
-        tensors: List[torch.Tensor] = ckpt["tensors"]
+        config = checkpoint["config"]
+        tensors: List[torch.Tensor] = checkpoint["tensors"]
 
         raw_dtype = config["dtype"]
         if isinstance(raw_dtype, str):
@@ -329,10 +329,10 @@ class MPS(nn.Module):
     @property
     def num_parameters(self) -> int:
         """Total real parameter count (complex tensors counted as 2 reals)."""
-        n = sum(t.numel() for t in self.site_tensors)
+        num_real_parameters = sum(t.numel() for t in self.site_tensors)
         if self.dtype in (torch.complex64, torch.complex128):
-            n *= 2
-        return n
+            num_real_parameters *= 2
+        return num_real_parameters
     
     @property
     def _numerical_floor(self) -> float:
@@ -497,8 +497,8 @@ class MPS(nn.Module):
         """
         log_z = self.log_norm()
         scale = torch.exp(-0.5 * log_z / self.num_sites)
-        for p in self.site_tensors:
-            p.data = p.data * scale
+        for site_parameter in self.site_tensors:
+            site_parameter.data = site_parameter.data * scale
 
     # ----------------------------------------------------------------------
     # Canonicalization and tensor manipulation
@@ -506,23 +506,23 @@ class MPS(nn.Module):
 
     def _truncation_rank(
         self,
-        S: torch.Tensor,
+        singular_values: torch.Tensor,
         max_bond_dim: Optional[int],
         cutoff: float,
     ) -> int:
         """
         Determine how many singular values to keep.
         """
-        n = len(S)
+        rank_to_keep = len(singular_values)
         if cutoff > 0:
-            S_max = S[0].abs().clamp_min(self._numerical_floor)
-            n = max(int((S / S_max >= cutoff).sum().item()), 1)
+            singular_values_max = singular_values[0].abs().clamp_min(self._numerical_floor)
+            rank_to_keep = max(int((singular_values / singular_values_max >= cutoff).sum().item()), 1)
         if max_bond_dim is not None:
-            n = min(n, max_bond_dim)
-        return n
+            rank_to_keep = min(rank_to_keep, max_bond_dim)
+        return rank_to_keep
     
     def _log_discarded_weight(
-        self, S: torch.Tensor, n_kept: int, where: str
+        self, singular_values: torch.Tensor, num_kept: int, where: str
     ) -> None:
         """Emit a warning if the discarded weight at a truncation exceeds the
         configured threshold.
@@ -533,15 +533,15 @@ class MPS(nn.Module):
         """
         if not logger.isEnabledFor(logging.WARNING):
             return
-        if n_kept >= len(S):
+        if num_kept >= len(singular_values):
             return
-        kept = S[:n_kept].square().sum()
-        total = S.square().sum().clamp_min(1e-30)
+        kept = singular_values[:num_kept].square().sum()
+        total = singular_values.square().sum().clamp_min(1e-30)
         discarded = (1.0 - kept / total).item()
         if discarded > self._discarded_weight_warn_threshold:
             logger.warning(
                 "%s: discarded %.1f%% weight (rank %d -> %d)",
-                where, 100.0 * discarded, len(S), n_kept,
+                where, 100.0 * discarded, len(singular_values), num_kept,
             )
     
     @torch.no_grad()
@@ -566,44 +566,44 @@ class MPS(nn.Module):
         if not truncate:
             for site in range(up_to):
                 tensor = self.site_tensors[site].data
-                D_l, d, D_r = tensor.shape
+                bond_dim_left, physical_dim, bond_dim_right = tensor.shape
  
-                Q, R = torch.linalg.qr(tensor.reshape(D_l * d, D_r))
-                new_D = Q.shape[-1]
-                self.site_tensors[site].data = Q.reshape(D_l, d, new_D)
+                Q, R = torch.linalg.qr(tensor.reshape(bond_dim_left * physical_dim, bond_dim_right))
+                new_bond_dim = Q.shape[-1]
+                self.site_tensors[site].data = Q.reshape(bond_dim_left, physical_dim, new_bond_dim)
  
                 next_tensor = self.site_tensors[site + 1].data
-                _, d_n, D_r2 = next_tensor.shape
+                _, physical_dim_next, bond_dim_right_next = next_tensor.shape
  
                 self.site_tensors[site + 1].data = (
-                    R @ next_tensor.reshape(D_r, d_n * D_r2)
-                ).reshape(new_D, d_n, D_r2)
+                    R @ next_tensor.reshape(bond_dim_right, physical_dim_next * bond_dim_right_next)
+                ).reshape(new_bond_dim, physical_dim_next, bond_dim_right_next)
             return None
  
-        singular_values: List[torch.Tensor] = []
+        singular_values_per_bond: List[torch.Tensor] = []
         for site in range(up_to):
             tensor = self.site_tensors[site].data
-            D_l, d, D_r = tensor.shape
+            bond_dim_left, physical_dim, bond_dim_right = tensor.shape
  
-            U, S, Vh = torch.linalg.svd(tensor.reshape(D_l * d, D_r), full_matrices=False)
-            n = self._truncation_rank(S, max_bond_dim, cutoff)
+            U, singular_values, Vh = torch.linalg.svd(tensor.reshape(bond_dim_left * physical_dim, bond_dim_right), full_matrices=False)
+            rank_kept = self._truncation_rank(singular_values, max_bond_dim, cutoff)
             self._log_discarded_weight(
-                S, n, where=f"left_canonicalize@bond_{site}"
+                singular_values, rank_kept, where=f"left_canonicalize@bond_{site}"
             )
-            U, S, Vh = U[:, :n], S[:n], Vh[:n, :]
+            U, singular_values, Vh = U[:, :rank_kept], singular_values[:rank_kept], Vh[:rank_kept, :]
  
-            singular_values.append(S.detach().clone())
-            self.site_tensors[site].data = U.reshape(D_l, d, n)
+            singular_values_per_bond.append(singular_values.detach().clone())
+            self.site_tensors[site].data = U.reshape(bond_dim_left, physical_dim, rank_kept)
  
-            SV = S.unsqueeze(1) * Vh
+            SV = singular_values.unsqueeze(1) * Vh
             next_tensor = self.site_tensors[site + 1].data
-            _, d_n, D_r2 = next_tensor.shape
+            _, physical_dim_next, bond_dim_right_next = next_tensor.shape
  
             self.site_tensors[site + 1].data = (
-                SV @ next_tensor.reshape(D_r, d_n * D_r2)
-            ).reshape(n, d_n, D_r2)
+                SV @ next_tensor.reshape(bond_dim_right, physical_dim_next * bond_dim_right_next)
+            ).reshape(rank_kept, physical_dim_next, bond_dim_right_next)
  
-        return singular_values
+        return singular_values_per_bond
 
     @torch.no_grad()
     def right_canonicalize(
@@ -627,45 +627,45 @@ class MPS(nn.Module):
         if not truncate:
             for site in range(self.num_sites - 1, from_site - 1, -1):
                 tensor = self.site_tensors[site].data
-                D_l, d, D_r = tensor.shape
+                bond_dim_left, physical_dim, bond_dim_right = tensor.shape
  
-                Q, R = torch.linalg.qr(tensor.reshape(D_l, d * D_r).conj().T)
-                new_D = Q.shape[1]
-                self.site_tensors[site].data = Q.conj().T.reshape(new_D, d, D_r)
+                Q, R = torch.linalg.qr(tensor.reshape(bond_dim_left, physical_dim * bond_dim_right).conj().T)
+                new_bond_dim = Q.shape[1]
+                self.site_tensors[site].data = Q.conj().T.reshape(new_bond_dim, physical_dim, bond_dim_right)
  
                 previous_tensor = self.site_tensors[site - 1].data
-                Rdag = R.conj().T
-                D_l2, d_p, _ = previous_tensor.shape
+                R_dagger = R.conj().T
+                bond_dim_left_previous, physical_dim_previous, _ = previous_tensor.shape
  
                 self.site_tensors[site - 1].data = (
-                    previous_tensor.reshape(D_l2 * d_p, D_l) @ Rdag
-                ).reshape(D_l2, d_p, new_D)
+                    previous_tensor.reshape(bond_dim_left_previous * physical_dim_previous, bond_dim_left) @ R_dagger
+                ).reshape(bond_dim_left_previous, physical_dim_previous, new_bond_dim)
             return None
  
-        singular_values: List[torch.Tensor] = []
+        singular_values_per_bond: List[torch.Tensor] = []
         for site in range(self.num_sites - 1, from_site - 1, -1):
             tensor = self.site_tensors[site].data
-            D_l, d, D_r = tensor.shape
+            bond_dim_left, physical_dim, bond_dim_right = tensor.shape
  
-            U, S, Vh = torch.linalg.svd(tensor.reshape(D_l, d * D_r), full_matrices=False)
-            n = self._truncation_rank(S, max_bond_dim, cutoff)
+            U, singular_values, Vh = torch.linalg.svd(tensor.reshape(bond_dim_left, physical_dim * bond_dim_right), full_matrices=False)
+            rank_kept = self._truncation_rank(singular_values, max_bond_dim, cutoff)
             self._log_discarded_weight(
-                S, n, where=f"right_canonicalize@bond_{site}"
+                singular_values, rank_kept, where=f"right_canonicalize@bond_{site}"
             )
-            U, S, Vh = U[:, :n], S[:n], Vh[:n, :]
+            U, singular_values, Vh = U[:, :rank_kept], singular_values[:rank_kept], Vh[:rank_kept, :]
  
-            singular_values.append(S.detach().clone())
-            self.site_tensors[site].data = Vh.reshape(n, d, D_r)
+            singular_values_per_bond.append(singular_values.detach().clone())
+            self.site_tensors[site].data = Vh.reshape(rank_kept, physical_dim, bond_dim_right)
  
-            US = U * S.unsqueeze(0)
+            US = U * singular_values.unsqueeze(0)
             previous_tensor = self.site_tensors[site - 1].data
-            D_l2, d_p, _ = previous_tensor.shape
+            bond_dim_left_previous, physical_dim_previous, _ = previous_tensor.shape
             self.site_tensors[site - 1].data = (
-                previous_tensor.reshape(D_l2 * d_p, D_l) @ US
-            ).reshape(D_l2, d_p, n)
+                previous_tensor.reshape(bond_dim_left_previous * physical_dim_previous, bond_dim_left) @ US
+            ).reshape(bond_dim_left_previous, physical_dim_previous, rank_kept)
  
-        singular_values.reverse()
-        return singular_values
+        singular_values_per_bond.reverse()
+        return singular_values_per_bond
     
     @torch.no_grad()
     def merge_sites(self, k: int) -> torch.Tensor:
@@ -674,19 +674,19 @@ class MPS(nn.Module):
         if not (0 <= k < self.num_sites - 1):
             raise MPSShapeError(f"Invalid bond index k={k}; expected 0 <= k < {self.num_sites - 1}")
 
-        A_k  = self.site_tensors[k].data
-        A_k1 = self.site_tensors[k + 1].data
+        site_tensor_first  = self.site_tensors[k].data
+        site_tensor_second = self.site_tensors[k + 1].data
 
-        D_l, d1, D_mid = A_k.shape
-        _, d2, D_r   = A_k1.shape
+        bond_dim_left, physical_dim_first, bond_dim_middle = site_tensor_first.shape
+        _, physical_dim_second, bond_dim_right   = site_tensor_second.shape
 
-        return (A_k.reshape(D_l * d1, D_mid) @ A_k1.reshape(D_mid, d2 * D_r)).reshape(D_l, d1, d2, D_r)
+        return (site_tensor_first.reshape(bond_dim_left * physical_dim_first, bond_dim_middle) @ site_tensor_second.reshape(bond_dim_middle, physical_dim_second * bond_dim_right)).reshape(bond_dim_left, physical_dim_first, physical_dim_second, bond_dim_right)
     
     @torch.no_grad()
     def split_and_truncate(
         self,
         k: int,
-        theta: torch.Tensor,
+        merged_tensor: torch.Tensor,
         direction: str,
         max_bond_dim: int,
         cutoff: float = 0.0,
@@ -701,37 +701,37 @@ class MPS(nn.Module):
             raise ValueError(
                 f"direction must be 'right' or 'left', got {direction!r}"
             )
-        if theta.dim() != 4:
+        if merged_tensor.dim() != 4:
             raise MPSShapeError(
-                f"theta must be rank-4 with shape (D_l, d, d, D_r), got shape {tuple(theta.shape)}"
+                f"theta must be rank-4 with shape (D_l, d, d, D_r), got shape {tuple(merged_tensor.shape)}"
             )
-        D_l, d1, d2, D_r = theta.shape
-        if d1 != self.physical_dim or d2 != self.physical_dim:
+        bond_dim_left, physical_dim_first, physical_dim_second, bond_dim_right = merged_tensor.shape
+        if physical_dim_first != self.physical_dim or physical_dim_second != self.physical_dim:
             raise MPSShapeError(
-                f"theta physical dims must be ({self.physical_dim}, {self.physical_dim}), got ({d1}, {d2})"
+                f"theta physical dims must be ({self.physical_dim}, {self.physical_dim}), got ({physical_dim_first}, {physical_dim_second})"
             )
-        expected_D_l = self.site_tensors[k].shape[0]
-        expected_D_r = self.site_tensors[k + 1].shape[2]
-        if D_l != expected_D_l or D_r != expected_D_r:
+        expected_bond_dim_left = self.site_tensors[k].shape[0]
+        expected_bond_dim_right = self.site_tensors[k + 1].shape[2]
+        if bond_dim_left != expected_bond_dim_left or bond_dim_right != expected_bond_dim_right:
             raise MPSShapeError(
-                f"theta bond dims ({D_l}, {D_r}) do not match adjacent sites "
-                f"({expected_D_l}, {expected_D_r})"
+                f"theta bond dims ({bond_dim_left}, {bond_dim_right}) do not match adjacent sites "
+                f"({expected_bond_dim_left}, {expected_bond_dim_right})"
             )
         self._validate_truncation(max_bond_dim, cutoff)
 
-        U, S, Vh = torch.linalg.svd(theta.reshape(D_l * d1, d2 * D_r), full_matrices=False)
-        n = self._truncation_rank(S, max_bond_dim, cutoff)
-        self._log_discarded_weight(S, n, where=f"split_and_truncate@bond_{k}")
-        U, S, Vh = U[:, :n], S[:n], Vh[:n, :]
+        U, singular_values, Vh = torch.linalg.svd(merged_tensor.reshape(bond_dim_left * physical_dim_first, physical_dim_second * bond_dim_right), full_matrices=False)
+        rank_kept = self._truncation_rank(singular_values, max_bond_dim, cutoff)
+        self._log_discarded_weight(singular_values, rank_kept, where=f"split_and_truncate@bond_{k}")
+        U, singular_values, Vh = U[:, :rank_kept], singular_values[:rank_kept], Vh[:rank_kept, :]
 
         if direction == "right":
-            self.site_tensors[k].data = U.reshape(D_l, d1, n)
-            self.site_tensors[k + 1].data = (S.unsqueeze(1) * Vh).reshape(n, d2, D_r)
+            self.site_tensors[k].data = U.reshape(bond_dim_left, physical_dim_first, rank_kept)
+            self.site_tensors[k + 1].data = (singular_values.unsqueeze(1) * Vh).reshape(rank_kept, physical_dim_second, bond_dim_right)
         else:
-            self.site_tensors[k].data = (U * S.unsqueeze(0)).reshape(D_l, d1, n)
-            self.site_tensors[k + 1].data = Vh.reshape(n, d2, D_r)
+            self.site_tensors[k].data = (U * singular_values.unsqueeze(0)).reshape(bond_dim_left, physical_dim_first, rank_kept)
+            self.site_tensors[k + 1].data = Vh.reshape(rank_kept, physical_dim_second, bond_dim_right)
 
-        return S.detach().clone()
+        return singular_values.detach().clone()
     
     @torch.no_grad()
     def swap_adjacent(
@@ -747,17 +747,17 @@ class MPS(nn.Module):
             raise MPSShapeError(f"Invalid bond index k={k}; expected 0 <= k < {self.num_sites - 1}")
         self._validate_truncation(max_bond_dim, cutoff)
  
-        theta = self.merge_sites(k)
-        theta_swapped = theta.permute(0, 2, 1, 3).contiguous()
+        merged_tensor = self.merge_sites(k)
+        merged_tensor_swapped = merged_tensor.permute(0, 2, 1, 3).contiguous()
  
-        D_l, d_k, d_kp1, D_r = theta.shape
+        bond_dim_left, physical_dim_first, physical_dim_second, bond_dim_right = merged_tensor.shape
         if max_bond_dim is None:
-            effective_cap = min(D_l * d_kp1, d_k * D_r)
+            effective_cap = min(bond_dim_left * physical_dim_second, physical_dim_first * bond_dim_right)
         else:
             effective_cap = max_bond_dim
             
         self.split_and_truncate(
-            k, theta_swapped, direction="right",
+            k, merged_tensor_swapped, direction="right",
             max_bond_dim=effective_cap,
             cutoff=cutoff,
         )
@@ -797,18 +797,18 @@ class MPS(nn.Module):
     # ----------------------------------------------------------------------
     
     @torch.no_grad()
-    def _apply_transfer_left(self, L: torch.Tensor, A: torch.Tensor) -> torch.Tensor:
-        matrices = self._as_matrices(A)
-        L_times_conj = torch.matmul(L, matrices.conj())
-        per_s = torch.matmul(matrices.transpose(1, 2), L_times_conj)
-        return per_s.sum(dim = 0)
+    def _apply_transfer_left(self, left_environment: torch.Tensor, site_tensor: torch.Tensor) -> torch.Tensor:
+        matrices = self._as_matrices(site_tensor)
+        left_times_conjugate = torch.matmul(left_environment, matrices.conj())
+        per_site = torch.matmul(matrices.transpose(1, 2), left_times_conjugate)
+        return per_site.sum(dim = 0)
     
     @torch.no_grad()
-    def _apply_transfer_right(self, R: torch.Tensor, A: torch.Tensor) -> torch.Tensor:
-        matrices = self._as_matrices(A)
-        M_times_R = torch.matmul(matrices, R)
-        per_s = torch.matmul(M_times_R, matrices.conj().transpose(1, 2))
-        return per_s.sum(dim = 0)
+    def _apply_transfer_right(self, right_environment: torch.Tensor, site_tensor: torch.Tensor) -> torch.Tensor:
+        matrices = self._as_matrices(site_tensor)
+        matrices_times_right = torch.matmul(matrices, right_environment)
+        per_site = torch.matmul(matrices_times_right, matrices.conj().transpose(1, 2))
+        return per_site.sum(dim = 0)
     
     @torch.no_grad()
     def transfer_environments_left(self) -> List[torch.Tensor]:
@@ -857,39 +857,39 @@ class MPS(nn.Module):
         return self.transfer_environments_left(), self.transfer_environments_right()
     
     @torch.no_grad()
-    def _open_site_rdm(self, L: torch.Tensor, A: torch.Tensor, R: torch.Tensor) -> torch.Tensor:
+    def _open_site_rdm(self, left_environment: torch.Tensor, site_tensor: torch.Tensor, right_environment: torch.Tensor) -> torch.Tensor:
         """
         Single-site RDM kernel (un-normalised).
         """
-        physical_dim = A.shape[1]
-        matrices = self._as_matrices(A)
+        physical_dim = site_tensor.shape[1]
+        matrices = self._as_matrices(site_tensor)
 
-        temp = torch.matmul(torch.matmul(L.transpose(0, 1), matrices), R)
-        conj_flat = matrices.conj().reshape(physical_dim, -1)
-        temp_flat = temp.reshape(physical_dim, -1)
+        intermediate = torch.matmul(torch.matmul(left_environment.transpose(0, 1), matrices), right_environment)
+        conjugate_flattened = matrices.conj().reshape(physical_dim, -1)
+        intermediate_flattened = intermediate.reshape(physical_dim, -1)
 
-        return torch.matmul(temp_flat, conj_flat.T)
+        return torch.matmul(intermediate_flattened, conjugate_flattened.T)
     
     @torch.no_grad()
-    def _open_two_sites_M(self, L: torch.Tensor, A: torch.Tensor) -> torch.Tensor:
+    def _open_two_sites_tensor(self, left_environment: torch.Tensor, site_tensor: torch.Tensor) -> torch.Tensor:
         """
         First step of two-site RDM: leave one physical index pair open.
         """
-        matrices = self._as_matrices(A)
-        conj = matrices.conj()
-        LA = torch.matmul(L.transpose(0, 1), matrices)
-        return torch.matmul(LA.permute(0, 2, 1).unsqueeze(1), conj.unsqueeze(0))
+        matrices = self._as_matrices(site_tensor)
+        conjugate_matrices = matrices.conj()
+        left_times_matrices = torch.matmul(left_environment.transpose(0, 1), matrices)
+        return torch.matmul(left_times_matrices.permute(0, 2, 1).unsqueeze(1), conjugate_matrices.unsqueeze(0))
     
     @torch.no_grad()
-    def _propagate_M(self, M: torch.Tensor, A: torch.Tensor) -> torch.Tensor:
+    def _propagate_open_two_site_tensor(self, open_two_site_tensor: torch.Tensor, site_tensor: torch.Tensor) -> torch.Tensor:
         """
         Propagate the open two-index tensor M through an intermediate site
         by tracing over its physical index (transfer matrix).
         """
-        matrices = self._as_matrices(A)
+        matrices = self._as_matrices(site_tensor)
 
         return torch.einsum(
-            "pca,xycd,pdb->xyab", matrices, M, matrices.conj()
+            "pca,xycd,pdb->xyab", matrices, open_two_site_tensor, matrices.conj()
         )
 
     # ----------------------------------------------------------------------
@@ -912,8 +912,8 @@ class MPS(nn.Module):
  
         rdm = self._open_site_rdm(left[site], self.site_tensors[site].data, right[site])
  
-        tr = rdm.diagonal().real.sum().clamp_min(self._numerical_floor)
-        return rdm / tr
+        trace = rdm.diagonal().real.sum().clamp_min(self._numerical_floor)
+        return rdm / trace
     
     @torch.no_grad()
     def all_single_site_rdms(self) -> List[torch.Tensor]:
@@ -924,8 +924,8 @@ class MPS(nn.Module):
         rdms: List[torch.Tensor] = []
         for k in range(self.num_sites):
             rdm = self._open_site_rdm(left[k], self.site_tensors[k].data, right[k])
-            tr = rdm.diagonal().real.sum().clamp_min(self._numerical_floor)
-            rdms.append(rdm / tr)
+            trace = rdm.diagonal().real.sum().clamp_min(self._numerical_floor)
+            rdms.append(rdm / trace)
         return rdms
     
     @torch.no_grad()
@@ -944,26 +944,24 @@ class MPS(nn.Module):
             raise MPSShapeError(
                 f"Need site_i < site_j, got ({site_i}, {site_j})"
             )
-        
-        d = self.physical_dim
  
         left, right = self._cached_environments()
  
-        L = left[site_i]
-        R = right[site_j]
-        A_i = self.site_tensors[site_i].data
-        A_j = self.site_tensors[site_j].data
+        left_environment = left[site_i]
+        right_environment = right[site_j]
+        site_tensor_i = self.site_tensors[site_i].data
+        site_tensor_j = self.site_tensors[site_j].data
  
-        M = self._open_two_sites_M(L, A_i)
+        open_two_site_tensor = self._open_two_sites_tensor(left_environment, site_tensor_i)
  
         for m in range(site_i + 1, site_j):
-            M = self._propagate_M(M, self.site_tensors[m].data)
+            open_two_site_tensor = self._propagate_open_two_site_tensor(open_two_site_tensor, self.site_tensors[m].data)
  
-        matrices_j = self._as_matrices(A_j)
-        conj_j = matrices_j.conj()
-        AjR = torch.matmul(matrices_j, R)
+        matrices_j = self._as_matrices(site_tensor_j)
+        conjugate_j = matrices_j.conj()
+        matrices_j_times_right = torch.matmul(matrices_j, right_environment)
  
-        rdm = torch.einsum("xyab,sac,tbc->xsyt", M, AjR, conj_j)
+        rdm = torch.einsum("xyab,sac,tbc->xsyt", open_two_site_tensor, matrices_j_times_right, conjugate_j)
  
         trace = torch.einsum("stst->", rdm).real.clamp_min(self._numerical_floor)
         return rdm / trace
@@ -993,28 +991,28 @@ class MPS(nn.Module):
  
         left, right = self._cached_environments()
  
-        L = left[lower]
-        R = right[higher]
-        A_lower = self.site_tensors[lower].data
-        A_higher = self.site_tensors[higher].data
+        left_environment = left[lower]
+        right_environment = right[higher]
+        site_tensor_lower = self.site_tensors[lower].data
+        site_tensor_higher = self.site_tensors[higher].data
  
         if site_i < site_j:
-            M = self._open_two_sites_M(L, A_lower)
+            open_two_site_tensor = self._open_two_sites_tensor(left_environment, site_tensor_lower)
  
             for m in range(lower + 1, higher):
-                M = self._propagate_M(M, self.site_tensors[m].data)
+                open_two_site_tensor = self._propagate_open_two_site_tensor(open_two_site_tensor, self.site_tensors[m].data)
  
-            Fj = A_higher[:, value_j, :]
-            RC = Fj @ R @ Fj.conj().T
-            rdm = (M * RC).sum(dim=(-2, -1))
+            fixed_value_j = site_tensor_higher[:, value_j, :]
+            right_conditioned = fixed_value_j @ right_environment @ fixed_value_j.conj().T
+            rdm = (open_two_site_tensor * right_conditioned).sum(dim=(-2, -1))
         else:
-            Fj = A_lower[:, value_j, :]
-            LC = Fj.T @ L @ Fj.conj()
+            fixed_value_j = site_tensor_lower[:, value_j, :]
+            left_conditioned = fixed_value_j.T @ left_environment @ fixed_value_j.conj()
  
             for m in range(lower + 1, higher):
-                LC = self._apply_transfer_left(LC, self.site_tensors[m].data)
+                left_conditioned = self._apply_transfer_left(left_conditioned, self.site_tensors[m].data)
  
-            rdm = self._open_site_rdm(LC, A_higher, R)
+            rdm = self._open_site_rdm(left_conditioned, site_tensor_higher, right_environment)
  
         trace = rdm.diagonal().real.sum().clamp_min(self._numerical_floor)
         return rdm / trace
@@ -1058,9 +1056,9 @@ class MPS(nn.Module):
         """
         rdms = self.all_single_site_rdms()
         out = torch.zeros(self.num_sites, dtype=torch.float64)
-        for k, r in enumerate(rdms):
-            eigs = torch.linalg.eigvalsh(r.real).clamp_min(self._numerical_floor)
-            out[k] = -(eigs * eigs.log()).sum().item()
+        for k, rdm in enumerate(rdms):
+            eigenvalues = torch.linalg.eigvalsh(rdm.real).clamp_min(self._numerical_floor)
+            out[k] = -(eigenvalues * eigenvalues.log()).sum().item()
         return out
     
     @torch.no_grad()
@@ -1078,25 +1076,25 @@ class MPS(nn.Module):
         where σ_i are the singular values at bond k.  Returns ``num_sites - 1`` values.
         """
         if preserve_state:
-            backup = [p.data.clone() for p in self.site_tensors]
+            tensor_backup = [parameter.data.clone() for parameter in self.site_tensors]
             try:
                 singular_values = self.left_canonicalize(
                     truncate=True, max_bond_dim=max_bond_dim, cutoff=cutoff
                 )
             finally:
-                for p, b in zip(self.site_tensors, backup):
-                    p.data = b
+                for parameter, backed_up_data in zip(self.site_tensors, tensor_backup):
+                    parameter.data = backed_up_data
         else:
-            singular_values = self.left_canonicalize(
+            singular_values_per_bond = self.left_canonicalize(
                 truncate=True, max_bond_dim=max_bond_dim, cutoff=cutoff
             )
 
         entropies: List[float] = []
-        for S in singular_values:
-            p = S.square()
-            p = p / p.sum().clamp_min(self._numerical_floor)
-            ent = -(p * p.clamp_min(self._numerical_floor).log()).sum()
-            entropies.append(ent.item())
+        for singular_values in singular_values_per_bond:
+            probabilities = singular_values.square()
+            probabilities = probabilities / probabilities.sum().clamp_min(self._numerical_floor)
+            entropy = -(probabilities * probabilities.clamp_min(self._numerical_floor).log()).sum()
+            entropies.append(entropy.item())
         return entropies
     
     # ----------------------------------------------------------------------
@@ -1119,23 +1117,23 @@ class MPS(nn.Module):
         if site_i == site_j:
             raise MPSShapeError("site_i and site_j must differ")
 
-        lo, hi = min(site_i, site_j), max(site_i, site_j)
+        lower_site, higher_site = min(site_i, site_j), max(site_i, site_j)
  
-        rdm_i = self.single_site_rdm(lo)
-        rdm_j = self.single_site_rdm(hi)
-        eigs_i = torch.linalg.eigvalsh(rdm_i.real).clamp_min(self._numerical_floor)
-        eigs_j = torch.linalg.eigvalsh(rdm_j.real).clamp_min(self._numerical_floor)
-        S_i = -(eigs_i * eigs_i.log()).sum().item()
-        S_j = -(eigs_j * eigs_j.log()).sum().item()
+        rdm_i = self.single_site_rdm(lower_site)
+        rdm_j = self.single_site_rdm(higher_site)
+        eigenvalues_i = torch.linalg.eigvalsh(rdm_i.real).clamp_min(self._numerical_floor)
+        eigenvalues_j = torch.linalg.eigvalsh(rdm_j.real).clamp_min(self._numerical_floor)
+        entropy_i = -(eigenvalues_i * eigenvalues_i.log()).sum().item()
+        entropy_j = -(eigenvalues_j * eigenvalues_j.log()).sum().item()
  
-        rdm_ij = self.two_site_rdm(lo, hi)
-        d = self.physical_dim
-        rho_matrix = rdm_ij.reshape(d * d, d * d)
-        eigs = torch.linalg.eigvalsh(rho_matrix.real)
-        eigs = eigs.clamp_min(self._numerical_floor)
-        S_ij = -(eigs * eigs.log()).sum().item()
+        rdm_ij = self.two_site_rdm(lower_site, higher_site)
+        physical_dim = self.physical_dim
+        density_matrix = rdm_ij.reshape(physical_dim * physical_dim, physical_dim * physical_dim)
+        eigenvalues = torch.linalg.eigvalsh(density_matrix.real)
+        eigenvalues = eigenvalues.clamp_min(self._numerical_floor)
+        entropy_ij = -(eigenvalues * eigenvalues.log()).sum().item()
  
-        return S_i + S_j - S_ij
+        return entropy_i + entropy_j - entropy_ij
     
     @torch.no_grad()
     def mutual_information_matrix(self) -> torch.Tensor:
@@ -1143,52 +1141,52 @@ class MPS(nn.Module):
         Full N×N mutual-information matrix in one pass.
         """
         N = self.num_sites
-        d = self.physical_dim
+        physical_dim = self.physical_dim
  
         left, right = self._cached_environments()
  
-        single_S = torch.zeros(N, dtype=torch.float64)
+        single_site_entropies = torch.zeros(N, dtype=torch.float64)
         for k in range(N):
             rdm = self._open_site_rdm(left[k], self.site_tensors[k].data, right[k])
-            tr = rdm.diagonal().real.sum().clamp_min(self._numerical_floor)
-            rdm = rdm / tr
-            eigs = torch.linalg.eigvalsh(rdm.real).clamp_min(self._numerical_floor)
-            single_S[k] = -(eigs * eigs.log()).sum().item()
+            trace = rdm.diagonal().real.sum().clamp_min(self._numerical_floor)
+            rdm = rdm / trace
+            eigenvalues = torch.linalg.eigvalsh(rdm.real).clamp_min(self._numerical_floor)
+            single_site_entropies[k] = -(eigenvalues * eigenvalues.log()).sum().item()
  
-        out = torch.zeros(N, N, dtype=torch.float64)
+        mutual_information_values = torch.zeros(N, N, dtype=torch.float64)
         for i in range(N):
-            out[i, i] = single_S[i]
+            mutual_information_values[i, i] = single_site_entropies[i]
  
         for i in range(N):
-            A_i = self.site_tensors[i].data
-            M = self._open_two_sites_M(left[i], A_i)
+            site_tensor_i = self.site_tensors[i].data
+            open_two_site_tensor = self._open_two_sites_tensor(left[i], site_tensor_i)
  
             for j in range(i + 1, N):
                 if j > i + 1:
-                    M = self._propagate_M(M, self.site_tensors[j - 1].data)
+                    open_two_site_tensor = self._propagate_open_two_site_tensor(open_two_site_tensor, self.site_tensors[j - 1].data)
  
-                A_j = self.site_tensors[j].data
-                R = right[j]
-                matrices_j = self._as_matrices(A_j)
-                conj_j = matrices_j.conj()
-                AjR = torch.matmul(matrices_j, R)
+                site_tensor_j = self.site_tensors[j].data
+                right_environment = right[j]
+                matrices_j = self._as_matrices(site_tensor_j)
+                conjugate_j = matrices_j.conj()
+                matrices_j_times_right = torch.matmul(matrices_j, right_environment)
  
-                rdm = torch.einsum("xyab,sac,tbc->xsyt", M, AjR, conj_j)
+                rdm = torch.einsum("xyab,sac,tbc->xsyt", open_two_site_tensor, matrices_j_times_right, conjugate_j)
 
                 trace = torch.einsum("stst->", rdm).real.clamp_min(
                     self._numerical_floor
                 )
                 rdm = rdm / trace
  
-                rho_matrix = rdm.reshape(d * d, d * d)
-                eigs = torch.linalg.eigvalsh(rho_matrix.real).clamp_min(self._numerical_floor)
-                S_ij = -(eigs * eigs.log()).sum().item()
+                density_matrix = rdm.reshape(physical_dim * physical_dim, physical_dim * physical_dim)
+                eigenvalues = torch.linalg.eigvalsh(density_matrix.real).clamp_min(self._numerical_floor)
+                entropy_ij = -(eigenvalues * eigenvalues.log()).sum().item()
  
-                mi_ij = single_S[i].item() + single_S[j].item() - S_ij
-                out[i, j] = mi_ij
-                out[j, i] = mi_ij
+                mutual_information_ij = single_site_entropies[i].item() + single_site_entropies[j].item() - entropy_ij
+                mutual_information_values[i, j] = mutual_information_ij
+                mutual_information_values[j, i] = mutual_information_ij
  
-        return out
+        return mutual_information_values
     
     # ----------------------------------------------------------------------
     # Sampling
@@ -1203,12 +1201,12 @@ class MPS(nn.Module):
             raise ValueError(f"num_samples must be >= 1, got {num_samples}")
         
         if preserve_state:
-            backup = [p.data.clone() for p in self.site_tensors]
+            tensor_backup = [parameter.data.clone() for parameter in self.site_tensors]
             try:
                 return self._sample_left_canonical(num_samples)
             finally:
-                for p, b in zip(self.site_tensors, backup):
-                    p.data = b
+                for parameter, backed_up_data in zip(self.site_tensors, tensor_backup):
+                    parameter.data = backed_up_data
         return self._sample_left_canonical(num_samples)
     
     def _sample_left_canonical(self, num_samples: int) -> torch.Tensor:
@@ -1219,40 +1217,40 @@ class MPS(nn.Module):
  
         samples = torch.zeros(num_samples, N, dtype=torch.long, device=device)
  
-        A_last = self.site_tensors[N - 1].data
-        matrices = self._as_matrices(A_last).squeeze(2)
+        site_tensor_last = self.site_tensors[N - 1].data
+        matrices = self._as_matrices(site_tensor_last).squeeze(2)
  
-        sq_norms = self._abs_squared(matrices)
-        probs = sq_norms.sum(dim=1)
-        probs = probs / probs.sum().clamp_min(self._numerical_floor)
-        self._check_valid_probs(probs, site=N - 1, ctx="sample")
+        squared_norms = self._abs_squared(matrices)
+        probabilities = squared_norms.sum(dim=1)
+        probabilities = probabilities / probabilities.sum().clamp_min(self._numerical_floor)
+        self._check_valid_probabilities(probabilities, site=N - 1, ctx="sample")
  
         chosen = torch.multinomial(
-            probs.unsqueeze(0).expand(num_samples, -1), 1
+            probabilities.unsqueeze(0).expand(num_samples, -1), 1
         ).squeeze(1)
         samples[:, N - 1] = chosen
  
         x = matrices[chosen]
  
         for k in range(N - 2, -1, -1):
-            A_k = self.site_tensors[k].data
-            mats = self._as_matrices(A_k)
+            site_tensor_k = self.site_tensors[k].data
+            matrices = self._as_matrices(site_tensor_k)
  
-            candidates = torch.matmul(mats, x.T)
+            candidates = torch.matmul(matrices, x.T)
             candidates = candidates.permute(2, 0, 1)
  
-            sq = self._abs_squared(candidates)
-            cond_probs = sq.sum(dim=2)
-            cond_probs = cond_probs / cond_probs.sum(dim=1, keepdim=True).clamp_min(self._numerical_floor)
-            self._check_valid_probs(cond_probs, site=k, ctx="sample")
+            squared_amplitudes = self._abs_squared(candidates)
+            conditional_probabilities = squared_amplitudes.sum(dim=2)
+            conditional_probabilities = conditional_probabilities / conditional_probabilities.sum(dim=1, keepdim=True).clamp_min(self._numerical_floor)
+            self._check_valid_probabilities(conditional_probabilities, site=k, ctx="sample")
  
-            chosen = torch.multinomial(cond_probs, 1).squeeze(1)
+            chosen = torch.multinomial(conditional_probabilities, 1).squeeze(1)
             samples[:, k] = chosen
  
-            idx = chosen.unsqueeze(1).unsqueeze(2).expand(
+            gather_indices = chosen.unsqueeze(1).unsqueeze(2).expand(
                 num_samples, 1, candidates.shape[2]
             )
-            x = candidates.gather(1, idx).squeeze(1)
+            x = candidates.gather(1, gather_indices).squeeze(1)
  
         return samples
     
@@ -1284,12 +1282,12 @@ class MPS(nn.Module):
             raise TypeError(f"mask must have dtype torch.bool, got {mask.dtype}")
         
         if preserve_state:
-            backup = [p.data.clone() for p in self.site_tensors]
+            tensor_backup = [parameter.data.clone() for parameter in self.site_tensors]
             try:
                 return self._sample_conditional_dispatch(known, mask, num_samples)
             finally:
-                for p, b in zip(self.site_tensors, backup):
-                    p.data = b
+                for parameter, backed_up_data in zip(self.site_tensors, tensor_backup):
+                    parameter.data = backed_up_data
         return self._sample_conditional_dispatch(known, mask, num_samples)
  
     def _sample_conditional_dispatch(
@@ -1305,32 +1303,32 @@ class MPS(nn.Module):
         mask = mask.to(device)
 
         if mask.any():
-            fixed_vals = known[mask]
-            lo = fixed_vals.min().item()
-            hi = fixed_vals.max().item()
-            if lo < 0 or hi >= self.physical_dim:
+            fixed_values = known[mask]
+            min_value = fixed_values.min().item()
+            max_value = fixed_values.max().item()
+            if min_value < 0 or max_value >= self.physical_dim:
                 raise MPSShapeError(
                     f"known values at fixed positions must be in "
                     f"[0, {self.physical_dim}), got range [{lo}, {hi}]"
                 )
  
-        free_pos = (~mask).nonzero(as_tuple=False).flatten()
-        fixed_pos = mask.nonzero(as_tuple=False).flatten()
+        free_positions = (~mask).nonzero(as_tuple=False).flatten()
+        fixed_positions = mask.nonzero(as_tuple=False).flatten()
  
-        if fixed_pos.numel() == 0:
+        if fixed_positions.numel() == 0:
             return self.sample(num_samples)
-        if free_pos.numel() == 0:
+        if free_positions.numel() == 0:
             return known.long().unsqueeze(0).expand(num_samples, N).clone()
  
-        if fixed_pos.min().item() > free_pos.max().item():
-            return self._sample_conditional_RL(known, mask, num_samples)
-        if fixed_pos.max().item() < free_pos.min().item():
-            return self._sample_conditional_LR(known, mask, num_samples)
+        if fixed_positions.min().item() > free_positions.max().item():
+            return self._sample_conditional_right_to_left(known, mask, num_samples)
+        if fixed_positions.max().item() < free_positions.min().item():
+            return self._sample_conditional_left_to_right(known, mask, num_samples)
  
         return self._sample_conditional_scattered(known, mask, num_samples)
  
     @torch.no_grad()
-    def _sample_conditional_RL(
+    def _sample_conditional_right_to_left(
         self,
         known: torch.Tensor,
         mask: torch.Tensor,
@@ -1345,46 +1343,46 @@ class MPS(nn.Module):
  
         samples = torch.zeros(num_samples, N, dtype=torch.long, device=device)
  
-        A_last = self.site_tensors[N - 1].data
-        matrices = self._as_matrices(A_last).squeeze(2)
+        site_tensor_last = self.site_tensors[N - 1].data
+        matrices = self._as_matrices(site_tensor_last).squeeze(2)
  
         if mask[N - 1]:
             chosen = known[N - 1].expand(num_samples)
         else:
-            sq_norms = self._abs_squared(matrices)
-            probs = sq_norms.sum(dim=1)
-            probs = probs / probs.sum().clamp_min(self._numerical_floor)
-            self._check_valid_probs(probs, site=N - 1, ctx="sample_conditional_RL")
+            squared_norms = self._abs_squared(matrices)
+            probabilities = squared_norms.sum(dim=1)
+            probabilities = probabilities / probabilities.sum().clamp_min(self._numerical_floor)
+            self._check_valid_probabilities(probabilities, site=N - 1, ctx="sample_conditional_RL")
             chosen = torch.multinomial(
-                probs.unsqueeze(0).expand(num_samples, -1), 1
+                probabilities.unsqueeze(0).expand(num_samples, -1), 1
             ).squeeze(1)
  
         samples[:, N - 1] = chosen
         x = matrices[chosen]
  
         for k in range(N - 2, -1, -1):
-            A_k = self.site_tensors[k].data
-            mats = self._as_matrices(A_k)
+            site_tensor_k = self.site_tensors[k].data
+            matrices = self._as_matrices(site_tensor_k)
  
-            candidates = torch.matmul(mats, x.T).permute(2, 0, 1)
+            candidates = torch.matmul(matrices, x.T).permute(2, 0, 1)
  
             if mask[k]:
                 chosen = known[k].expand(num_samples)
             else:
-                sq = self._abs_squared(candidates)
-                cond_probs = sq.sum(dim=2)
-                cond_probs = cond_probs / cond_probs.sum(dim=1, keepdim=True).clamp_min(self._numerical_floor)
-                self._check_valid_probs(cond_probs, site=k, ctx="sample_conditional_RL")
-                chosen = torch.multinomial(cond_probs, 1).squeeze(1)
+                squared_amplitudes = self._abs_squared(candidates)
+                conditional_probabilities = squared_amplitudes.sum(dim=2)
+                conditional_probabilities = conditional_probabilities / conditional_probabilities.sum(dim=1, keepdim=True).clamp_min(self._numerical_floor)
+                self._check_valid_probabilities(conditional_probabilities, site=k, ctx="sample_conditional_RL")
+                chosen = torch.multinomial(conditional_probabilities, 1).squeeze(1)
  
             samples[:, k] = chosen
-            idx = chosen.unsqueeze(1).unsqueeze(2).expand(num_samples, 1, candidates.shape[2])
-            x = candidates.gather(1, idx).squeeze(1)
+            gather_indices = chosen.unsqueeze(1).unsqueeze(2).expand(num_samples, 1, candidates.shape[2])
+            x = candidates.gather(1, gather_indices).squeeze(1)
  
         return samples
  
     @torch.no_grad()
-    def _sample_conditional_LR(
+    def _sample_conditional_left_to_right(
         self,
         known: torch.Tensor,
         mask: torch.Tensor,
@@ -1400,41 +1398,41 @@ class MPS(nn.Module):
  
         samples = torch.zeros(num_samples, N, dtype=torch.long, device=device)
  
-        A_first = self.site_tensors[0].data
-        matrices = self._as_matrices(A_first).squeeze(1)
+        site_tensor_first = self.site_tensors[0].data
+        matrices = self._as_matrices(site_tensor_first).squeeze(1)
  
         if mask[0]:
             chosen = known[0].expand(num_samples)
         else:
-            sq_norms = self._abs_squared(matrices)
-            probs = sq_norms.sum(dim=1)
-            probs = probs / probs.sum().clamp_min(self._numerical_floor)
-            self._check_valid_probs(probs, site=0, ctx="sample_conditional_LR")
+            squared_norms = self._abs_squared(matrices)
+            probabilities = squared_norms.sum(dim=1)
+            probabilities = probabilities / probabilities.sum().clamp_min(self._numerical_floor)
+            self._check_valid_probabilities(probabilities, site=0, ctx="sample_conditional_LR")
             chosen = torch.multinomial(
-                probs.unsqueeze(0).expand(num_samples, -1), 1
+                probabilities.unsqueeze(0).expand(num_samples, -1), 1
             ).squeeze(1)
  
         samples[:, 0] = chosen
         x = matrices[chosen]
  
         for k in range(1, N):
-            A_k = self.site_tensors[k].data
-            mats = self._as_matrices(A_k)
+            site_tensor_k = self.site_tensors[k].data
+            matrices = self._as_matrices(site_tensor_k)
  
-            candidates = torch.einsum('sa,vab->svb', x, mats)
+            candidates = torch.einsum('sa,vab->svb', x, matrices)
  
             if mask[k]:
                 chosen = known[k].expand(num_samples)
             else:
-                sq = self._abs_squared(candidates)
-                cond_probs = sq.sum(dim=2)
-                cond_probs = cond_probs / cond_probs.sum(dim=1, keepdim=True).clamp_min(self._numerical_floor)
-                self._check_valid_probs(cond_probs, site=k, ctx="sample_conditional_LR")
-                chosen = torch.multinomial(cond_probs, 1).squeeze(1)
+                squared_amplitudes = self._abs_squared(candidates)
+                conditional_probabilities = squared_amplitudes.sum(dim=2)
+                conditional_probabilities = conditional_probabilities / conditional_probabilities.sum(dim=1, keepdim=True).clamp_min(self._numerical_floor)
+                self._check_valid_probabilities(conditional_probabilities, site=k, ctx="sample_conditional_LR")
+                chosen = torch.multinomial(conditional_probabilities, 1).squeeze(1)
  
             samples[:, k] = chosen
-            idx = chosen.unsqueeze(1).unsqueeze(2).expand(num_samples, 1, candidates.shape[2])
-            x = candidates.gather(1, idx).squeeze(1)
+            gather_indices = chosen.unsqueeze(1).unsqueeze(2).expand(num_samples, 1, candidates.shape[2])
+            x = candidates.gather(1, gather_indices).squeeze(1)
  
         return samples
     
@@ -1456,18 +1454,18 @@ class MPS(nn.Module):
         right_masked[N - 1] = torch.ones(1, 1, dtype=self.dtype, device=device)
  
         for k in range(N - 1, 0, -1):
-            A_k = self.site_tensors[k].data
-            mats = self._as_matrices(A_k)
-            R_next = right_masked[k]
+            site_tensor_k = self.site_tensors[k].data
+            matrices = self._as_matrices(site_tensor_k)
+            right_environment_next = right_masked[k]
  
             if mask[k]:
-                v = int(known[k].item())
-                A_v = mats[v]
-                right_masked[k - 1] = A_v @ R_next @ A_v.conj().T
+                fixed_value = int(known[k].item())
+                site_tensor_at_value = matrices[fixed_value]
+                right_masked[k - 1] = site_tensor_at_value @ right_environment_next @ site_tensor_at_value.conj().T
             else:
-                AR = torch.matmul(mats, R_next)
+                matrices_times_right = torch.matmul(matrices, right_environment_next)
                 right_masked[k - 1] = torch.matmul(
-                    AR, mats.conj().transpose(1, 2)
+                    matrices_times_right, matrices.conj().transpose(1, 2)
                 ).sum(dim=0)
  
         samples = torch.zeros(num_samples, N, dtype=torch.long, device=device)
@@ -1475,32 +1473,32 @@ class MPS(nn.Module):
         x = torch.ones(num_samples, 1, dtype=self.dtype, device=device)
  
         for k in range(N):
-            A_k = self.site_tensors[k].data
-            mats = self._as_matrices(A_k)
-            R_next = right_masked[k]
+            site_tensor_k = self.site_tensors[k].data
+            matrices = self._as_matrices(site_tensor_k)
+            right_environment_next = right_masked[k]
  
-            candidates = torch.einsum('sa,vab->svb', x, mats)
+            candidates = torch.einsum('sa,vab->svb', x, matrices)
  
             if mask[k]:
-                v = int(known[k].item())
+                fixed_value = int(known[k].item())
                 chosen = torch.full(
-                    (num_samples,), v, dtype=torch.long, device=device,
+                    (num_samples,), fixed_value, dtype=torch.long, device=device,
                 )
             else:
-                t = torch.einsum('svb,bc->svc', candidates, R_next)
-                w = (t * candidates.conj()).sum(dim=2)
+                weighted_candidates = torch.einsum('svb,bc->svc', candidates, right_environment_next)
+                weights = (weighted_candidates * candidates.conj()).sum(dim=2)
                 if is_complex:
-                    w = w.real
-                w = w.clamp_min(self._numerical_floor)
-                w = w / w.sum(dim=1, keepdim=True).clamp_min(self._numerical_floor)
-                self._check_valid_probs(w, site=k, ctx="sample_conditional_scattered")
-                chosen = torch.multinomial(w, 1).squeeze(1)
+                    weights = weights.real
+                weights = weights.clamp_min(self._numerical_floor)
+                conditional_probabilities = weights / weights.sum(dim=1, keepdim=True).clamp_min(self._numerical_floor)
+                self._check_valid_probabilities(conditional_probabilities, site=k, ctx="sample_conditional_scattered")
+                chosen = torch.multinomial(conditional_probabilities, 1).squeeze(1)
  
             samples[:, k] = chosen
-            idx = chosen.unsqueeze(1).unsqueeze(2).expand(
+            gather_indices = chosen.unsqueeze(1).unsqueeze(2).expand(
                 num_samples, 1, candidates.shape[2]
             )
-            x = candidates.gather(1, idx).squeeze(1)
+            x = candidates.gather(1, gather_indices).squeeze(1)
  
         return samples
 

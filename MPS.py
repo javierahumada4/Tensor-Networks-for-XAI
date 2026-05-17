@@ -1,8 +1,11 @@
+import logging
 import math
-from typing import Optional, List, Dict, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
+
+logger = logging.getLogger(__name__)
 
 # ----------------------------------------------------------------------
 #  Exceptions
@@ -516,6 +519,29 @@ class MPS(nn.Module):
             n = min(n, max_bond_dim)
         return n
     
+    def _log_discarded_weight(
+        self, S: torch.Tensor, n_kept: int, where: str
+    ) -> None:
+        """Emit a warning if the discarded weight at a truncation exceeds the
+        configured threshold.
+
+        Short-circuits when the logger is disabled at WARNING level so that
+        the (cheap but non-zero) ``square().sum()`` and the host sync are
+        avoided in production runs where the warning is filtered out.
+        """
+        if not logger.isEnabledFor(logging.WARNING):
+            return
+        if n_kept >= len(S):
+            return
+        kept = S[:n_kept].square().sum()
+        total = S.square().sum().clamp_min(1e-30)
+        discarded = (1.0 - kept / total).item()
+        if discarded > self._discarded_weight_warn_threshold:
+            logger.warning(
+                "%s: discarded %.1f%% weight (rank %d -> %d)",
+                where, 100.0 * discarded, len(S), n_kept,
+            )
+    
     @torch.no_grad()
     def left_canonicalize(
         self,
@@ -559,6 +585,9 @@ class MPS(nn.Module):
  
             U, S, Vh = torch.linalg.svd(tensor.reshape(D_l * d, D_r), full_matrices=False)
             n = self._truncation_rank(S, max_bond_dim, cutoff)
+            self._log_discarded_weight(
+                S, n, where=f"left_canonicalize@bond_{site}"
+            )
             U, S, Vh = U[:, :n], S[:n], Vh[:n, :]
  
             singular_values.append(S.detach().clone())
@@ -618,6 +647,9 @@ class MPS(nn.Module):
  
             U, S, Vh = torch.linalg.svd(tensor.reshape(D_l, d * D_r), full_matrices=False)
             n = self._truncation_rank(S, max_bond_dim, cutoff)
+            self._log_discarded_weight(
+                S, n, where=f"right_canonicalize@bond_{site}"
+            )
             U, S, Vh = U[:, :n], S[:n], Vh[:n, :]
  
             singular_values.append(S.detach().clone())
@@ -687,6 +719,7 @@ class MPS(nn.Module):
 
         U, S, Vh = torch.linalg.svd(theta.reshape(D_l * d1, d2 * D_r), full_matrices=False)
         n = self._truncation_rank(S, max_bond_dim, cutoff)
+        self._log_discarded_weight(S, n, where=f"split_and_truncate@bond_{k}")
         U, S, Vh = U[:, :n], S[:n], Vh[:n, :]
 
         if direction == "right":
@@ -1223,7 +1256,7 @@ class MPS(nn.Module):
             candidates = torch.matmul(mats, x.T)
             candidates = candidates.permute(2, 0, 1)
  
-            sq = self._abs_squared(matrices)
+            sq = self._abs_squared(candidates)
             cond_probs = sq.sum(dim=2)
             cond_probs = cond_probs / cond_probs.sum(dim=1, keepdim=True).clamp_min(self._numerical_floor)
             self._check_valid_probs(cond_probs, site=k, ctx="sample")
@@ -1353,7 +1386,7 @@ class MPS(nn.Module):
             if mask[k]:
                 chosen = known[k].expand(num_samples)
             else:
-                sq = self._abs_squared(matrices)
+                sq = self._abs_squared(candidates)
                 cond_probs = sq.sum(dim=2)
                 cond_probs = cond_probs / cond_probs.sum(dim=1, keepdim=True).clamp_min(self._numerical_floor)
                 self._check_valid_probs(cond_probs, site=k, ctx="sample_conditional_RL")
@@ -1408,7 +1441,7 @@ class MPS(nn.Module):
             if mask[k]:
                 chosen = known[k].expand(num_samples)
             else:
-                sq = self._abs_squared(matrices)
+                sq = self._abs_squared(candidates)
                 cond_probs = sq.sum(dim=2)
                 cond_probs = cond_probs / cond_probs.sum(dim=1, keepdim=True).clamp_min(self._numerical_floor)
                 self._check_valid_probs(cond_probs, site=k, ctx="sample_conditional_LR")

@@ -1,6 +1,8 @@
+from __future__ import annotations
+
 import logging
 import math
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -24,8 +26,6 @@ class MPSNumericalError(MPSError, RuntimeError):
 #  Checkpoint format
 # ----------------------------------------------------------------------
 
-_CHECKPOINT_FORMAT_VERSION: int = 2
-
 _DTYPE_MAP: Dict[str, torch.dtype] = {
         "float32": torch.float32,
         "float64": torch.float64,
@@ -46,7 +46,7 @@ class MPS(nn.Module):
             self,
             num_sites: int,
             bond_dim: int,
-            physical_dim: int = 2,
+            physical_dims: Union[int, Sequence[int]] = 2,
             dtype: torch.dtype = torch.float32,
             init_std: Optional[float] = None,
             *,
@@ -58,8 +58,6 @@ class MPS(nn.Module):
             raise MPSShapeError(f"num_sites must be >= 2, got {num_sites}")
         if bond_dim < 1:
             raise MPSShapeError(f"bond_dim must be >= 1, got {bond_dim}")
-        if physical_dim < 2:
-            raise MPSShapeError(f"physical_dim must be >= 2, got {physical_dim}")
         if dtype not in (torch.float32, torch.float64, torch.complex64, torch.complex128):
             raise TypeError(
                 f"Unsupported dtype: {dtype}. Use float32/float64/complex64/complex128."
@@ -67,8 +65,9 @@ class MPS(nn.Module):
 
         self.num_sites = num_sites
         self.bond_dim = bond_dim
-        self.physical_dim = physical_dim
         self.dtype = dtype
+
+        self.physical_dims: List[int] = self._normalise_physical_dims(physical_dims)
 
         if _skip_init:
             self.site_tensors = self._empty_init()
@@ -95,14 +94,14 @@ class MPS(nn.Module):
 
         tensor_list: List[nn.Parameter] = []
 
-        left_tensor = self._randn(1, self.physical_dim, self.bond_dim) * init_std
+        left_tensor = self._randn(1, self.physical_dims[0], self.bond_dim) * init_std
         tensor_list.append(nn.Parameter(left_tensor))
 
-        for _ in range(1, self.num_sites-1):
-            bulk_tensor = self._randn(self.bond_dim, self.physical_dim, self.bond_dim) * init_std
+        for k in range(1, self.num_sites-1):
+            bulk_tensor = self._randn(self.bond_dim, self.physical_dims[k], self.bond_dim) * init_std
             tensor_list.append(nn.Parameter(bulk_tensor))
 
-        right_tensor = self._randn(self.bond_dim, self.physical_dim, 1) * init_std
+        right_tensor = self._randn(self.bond_dim, self.physical_dims[-1], 1) * init_std
         tensor_list.append(nn.Parameter(right_tensor))
 
         return nn.ParameterList(tensor_list)
@@ -110,17 +109,40 @@ class MPS(nn.Module):
     def _empty_init(self) -> torch.Tensor:
         tensor_list: List[nn.Parameter] = []
 
-        left_tensor = torch.zeros(1, self.physical_dim, self.bond_dim, dtype=self.dtype)
+        left_tensor = torch.zeros(1, self.physical_dims[0], self.bond_dim, dtype=self.dtype)
         tensor_list.append(nn.Parameter(left_tensor))
 
-        for _ in range(1, self.num_sites-1):
-            bulk_tensor = torch.zeros(self.bond_dim, self.physical_dim, self.bond_dim, dtype=self.dtype)
+        for k in range(1, self.num_sites-1):
+            bulk_tensor = torch.zeros(self.bond_dim, self.physical_dims[k], self.bond_dim, dtype=self.dtype)
             tensor_list.append(nn.Parameter(bulk_tensor))
 
-        right_tensor = torch.zeros(self.bond_dim, self.physical_dim, 1, dtype=self.dtype)
+        right_tensor = torch.zeros(self.bond_dim, self.physical_dims[-1], 1, dtype=self.dtype)
         tensor_list.append(nn.Parameter(right_tensor))
 
         return nn.ParameterList(tensor_list)
+    
+    def _normalise_physical_dims(self, physical_dim: Union[int, Sequence[int]] = 2) -> List[int]:
+        if isinstance(physical_dim, int):
+            if physical_dim < 2:
+                raise MPSShapeError(f"physical_dim must be >= 2, got {physical_dim}")
+            physical_dims: List[int] = [physical_dim] * self.num_sites
+        else:
+            physical_dims = list(physical_dim)
+            if len(physical_dims) != self.num_sites:
+                raise MPSShapeError(
+                    f"physical_dim sequence has length {len(physical_dims)}, "
+                    f"expected {self.num_sites}"
+                )
+            for k, d in enumerate(physical_dims):
+                if not isinstance(d, int):
+                    raise TypeError(
+                        f"physical_dim[{k}]={d!r} must be int, got {type(d).__name__}"
+                    )
+                if d < 2:
+                    raise MPSShapeError(
+                        f"physical_dim[{k}]={d} must be >= 2"
+                    )
+        return physical_dims
     
     # ------------------------------------------------------------------
     #  Input validation helpers
@@ -144,13 +166,27 @@ class MPS(nn.Module):
             )
         if configurations.numel() == 0:
             return
-        min_value = configurations.min().item()
-        max_value = configurations.max().item()
-        if min_value < 0 or max_value >= self.physical_dim:
-            raise MPSShapeError(
-                f"configurations values must be in [0, {self.physical_dim}), "
-                f"got range [{min_value}, {max_value}]"
-            )
+       
+        if self.is_homogeneous:
+            physical_dim = self.physical_dims[0]
+            min_value = configurations.min().item()
+            max_value = configurations.max().item()
+            if min_value < 0 or max_value >= physical_dim:
+                raise MPSShapeError(
+                    f"configurations values must be in [0, {physical_dim}), "
+                    f"got range [{min_value}, {max_value}]"
+                )
+            return
+        min_values = configurations.min(dim=0).values
+        max_values = configurations.max(dim=0).values
+        for k, physical_dim in enumerate(self.physical_dims):
+            min_value = min_values[k].item()
+            max_value = max_values[k].item()
+            if min_value < 0 or max_value >= physical_dim:
+                raise MPSShapeError(
+                    f"configurations[:, {k}] values must be in [0, {physical_dim}), "
+                    f"got range [{min_value}, {max_value}]"
+                )
 
     def _validate_truncation(
         self, max_bond_dim: Optional[int], cutoff: float
@@ -259,11 +295,10 @@ class MPS(nn.Module):
         """
         torch.save(
             {
-                "format_version": _CHECKPOINT_FORMAT_VERSION,
                 "config": {
                     "num_sites": self.num_sites,
                     "bond_dim": self.bond_dim,
-                    "physical_dim": self.physical_dim,
+                    "physical_dims": list(self.physical_dims),
                     "dtype": _REVERSE_DTYPE_MAP[self.dtype],
                 },
                 "tensors": [site_tensor.detach().cpu().clone() for site_tensor in self.site_tensors],
@@ -277,12 +312,6 @@ class MPS(nn.Module):
         Reconstruct an MPS previously saved with :meth:`save`.
         """
         checkpoint = torch.load(path, map_location=map_location, weights_only=True)
-        version = checkpoint.get("format_version")
-        if version not in (1, _CHECKPOINT_FORMAT_VERSION):
-            raise ValueError(
-                f"Unrecognised checkpoint format_version={version!r} at "
-                f"{path!r}; supported: 1, {_CHECKPOINT_FORMAT_VERSION}."
-            )
         config = checkpoint["config"]
         tensors: List[torch.Tensor] = checkpoint["tensors"]
 
@@ -301,7 +330,7 @@ class MPS(nn.Module):
         model = cls(
             num_sites=config["num_sites"],
             bond_dim=config["bond_dim"],
-            physical_dim=config["physical_dim"],
+            physical_dim=config["physical_dims"],
             dtype=dtype,
             _skip_init=True,
         )
@@ -340,6 +369,12 @@ class MPS(nn.Module):
         if self.dtype in (torch.float32, torch.complex64):
             return 1e-15
         return 1e-30
+    
+    @property
+    def is_homogeneous(self) -> bool:
+        """True iff every site has the same physical dimension."""
+        d0 = self.physical_dims[0]
+        return all(d == d0 for d in self.physical_dims)
     
     # ----------------------------------------------------------------------
     # Amplitudes, norms, probabilities
@@ -706,9 +741,11 @@ class MPS(nn.Module):
                 f"theta must be rank-4 with shape (D_l, d, d, D_r), got shape {tuple(merged_tensor.shape)}"
             )
         bond_dim_left, physical_dim_first, physical_dim_second, bond_dim_right = merged_tensor.shape
-        if physical_dim_first != self.physical_dim or physical_dim_second != self.physical_dim:
+        expected_physical_dim_first = self.physical_dims[k]
+        expected_physical_dim_second = self.physical_dims[k + 1]
+        if physical_dim_first != expected_physical_dim_first or physical_dim_second != expected_physical_dim_second:
             raise MPSShapeError(
-                f"theta physical dims must be ({self.physical_dim}, {self.physical_dim}), got ({physical_dim_first}, {physical_dim_second})"
+                f"theta physical dims must be ({expected_physical_dim_first}, {expected_physical_dim_second}), got ({physical_dim_first}, {physical_dim_second})"
             )
         expected_bond_dim_left = self.site_tensors[k].shape[0]
         expected_bond_dim_right = self.site_tensors[k + 1].shape[2]
@@ -755,6 +792,11 @@ class MPS(nn.Module):
             effective_cap = min(bond_dim_left * physical_dim_second, physical_dim_first * bond_dim_right)
         else:
             effective_cap = max_bond_dim
+
+        self.physical_dims[k], self.physical_dims[k + 1] = (
+            self.physical_dims[k + 1],
+            self.physical_dims[k],
+        )
             
         self.split_and_truncate(
             k, merged_tensor_swapped, direction="right",
@@ -982,9 +1024,9 @@ class MPS(nn.Module):
         self._validate_site(site_j, "site_j")
         if site_i == site_j:
             raise MPSShapeError("site_i and site_j must differ")
-        if not (0 <= value_j < self.physical_dim):
+        if not (0 <= value_j < self.physical_dims[site_j]):
             raise MPSShapeError(
-                f"value_j={value_j} out of range [0, {self.physical_dim})"
+                f"value_j={value_j} out of range [0, {self.physical_dims[site_j]}) for site {site_j}"
             )
  
         lower, higher = min(site_i, site_j), max(site_i, site_j)
@@ -1033,7 +1075,7 @@ class MPS(nn.Module):
         return rdm.diagonal().real
     
     @torch.no_grad()
-    def all_feature_probabilities(self) -> torch.Tensor:
+    def all_feature_probabilities(self) -> List[torch.Tensor]:
         """
         Marginal probabilities P(v_k = s) for every site k and value s.
  
@@ -1041,8 +1083,7 @@ class MPS(nn.Module):
         Faster than a Python loop over `feature_probabilities(k)`.
         """
         rdms = self.all_single_site_rdms()
-        out = torch.stack([r.diagonal().real for r in rdms], dim=0)
-        return out
+        return [rdm.diagonal().real for rdm in rdms]
     
     @torch.no_grad()
     def site_entropies(self) -> torch.Tensor:
@@ -1127,8 +1168,9 @@ class MPS(nn.Module):
         entropy_j = -(eigenvalues_j * eigenvalues_j.log()).sum().item()
  
         rdm_ij = self.two_site_rdm(lower_site, higher_site)
-        physical_dim = self.physical_dim
-        density_matrix = rdm_ij.reshape(physical_dim * physical_dim, physical_dim * physical_dim)
+        physical_dim_i = self.physical_dims[lower_site]
+        physical_dim_j = self.physical_dims[higher_site]
+        density_matrix = rdm_ij.reshape(physical_dim_i * physical_dim_j, physical_dim_i * physical_dim_j)
         eigenvalues = torch.linalg.eigvalsh(density_matrix.real)
         eigenvalues = eigenvalues.clamp_min(self._numerical_floor)
         entropy_ij = -(eigenvalues * eigenvalues.log()).sum().item()
@@ -1178,7 +1220,9 @@ class MPS(nn.Module):
                 )
                 rdm = rdm / trace
  
-                density_matrix = rdm.reshape(physical_dim * physical_dim, physical_dim * physical_dim)
+                physical_dim_i = self.physical_dims[i]
+                physical_dim_j = self.physical_dims[j]
+                density_matrix = rdm.reshape(physical_dim_i * physical_dim_j, physical_dim_i * physical_dim_j)
                 eigenvalues = torch.linalg.eigvalsh(density_matrix.real).clamp_min(self._numerical_floor)
                 entropy_ij = -(eigenvalues * eigenvalues.log()).sum().item()
  
@@ -1303,14 +1347,15 @@ class MPS(nn.Module):
         mask = mask.to(device)
 
         if mask.any():
-            fixed_values = known[mask]
-            min_value = fixed_values.min().item()
-            max_value = fixed_values.max().item()
-            if min_value < 0 or max_value >= self.physical_dim:
-                raise MPSShapeError(
-                    f"known values at fixed positions must be in "
-                    f"[0, {self.physical_dim}), got range [{min_value}, {max_value}]"
-                )
+            fixed_positions_check = mask.nonzero(as_tuple=False).flatten()
+            for pos in fixed_positions_check.tolist():
+                physical_dim = self.physical_dims[pos]
+                value = int(known[pos].item())
+                if value < 0 or value >= physical_dim:
+                    raise MPSShapeError(
+                        f"known[{pos}]={value} out of range [0, {physical_dim}) "
+                        f"for that site's physical dim"
+                    )
  
         free_positions = (~mask).nonzero(as_tuple=False).flatten()
         fixed_positions = mask.nonzero(as_tuple=False).flatten()

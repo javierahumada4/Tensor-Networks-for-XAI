@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import dataclasses
 import json
 import logging
@@ -229,7 +231,8 @@ class DMRGTrainer:
         ∂L/∂θ = 2θ/Z − (2/|B|) Σ_v [outer(L_v, R_v)/Ψ(v)]
         """
 
-        physical_dim = self.mps.physical_dim
+        physical_dim_first = self.mps.physical_dims[k]
+        physical_dim_second = self.mps.physical_dims[k + 1]
         batch_size = configurations.shape[0]
 
         z_floor = self._z_floor(merged_tensor.dtype)
@@ -256,13 +259,13 @@ class DMRGTrainer:
  
         contributions = left_weighted.unsqueeze(2) * right_weighted.unsqueeze(1)
  
-        flattened_indices = configuration_values_first * physical_dim + configuration_values_second
-        data_term_flattened = torch.zeros(physical_dim * physical_dim, bond_dim_left, bond_dim_right,
+        flattened_indices = configuration_values_first * physical_dim_second + configuration_values_second
+        data_term_flattened = torch.zeros(physical_dim_first * physical_dim_second, bond_dim_left, bond_dim_right,
                                  dtype=merged_tensor.dtype, device=merged_tensor.device)
         data_term_flattened.index_add_(0, flattened_indices, contributions)
  
         data_term = (data_term_flattened
-                 .view(physical_dim, physical_dim, bond_dim_left, bond_dim_right)
+                 .view(physical_dim_first, physical_dim_second, bond_dim_left, bond_dim_right)
                  .permute(2, 0, 1, 3)
                  .contiguous())
         data_term = (2.0 / batch_size) * data_term

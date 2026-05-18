@@ -134,7 +134,7 @@ class DMRGTrainer:
     #  Environment construction and updates
     # ------------------------------------------------------------------
     
-    def _build_left_envs(self, configurations: torch.Tensor) -> List[torch.Tensor]:
+    def _build_left_environments(self, configurations: torch.Tensor) -> List[torch.Tensor]:
         """
         left_envs[k] = contraction of sites 0..k-1 with data.
         Shape: (batch, D_{k-1}).
@@ -152,7 +152,7 @@ class DMRGTrainer:
 
         return environments
     
-    def _build_right_envs(self, configurations: torch.Tensor) -> List[torch.Tensor]:
+    def _build_right_environments(self, configurations: torch.Tensor) -> List[torch.Tensor]:
         """
         right_envs[k] = contraction of sites k+1..N-1 with data.
         Shape: (batch, D_k).
@@ -170,15 +170,15 @@ class DMRGTrainer:
 
         return environments
 
-    def _update_left_env(self, left_env: torch.Tensor, site: int, configs: torch.Tensor) -> torch.Tensor:
+    def _update_left_environment(self, left_environment: torch.Tensor, site: int, configs: torch.Tensor) -> torch.Tensor:
         tensor = self.mps.site_tensors[site].data
         selected_matrices = tensor[:, configs[:, site], :].permute(1, 0, 2)
-        return torch.bmm(left_env.unsqueeze(1), selected_matrices).squeeze(1)
+        return torch.bmm(left_environment.unsqueeze(1), selected_matrices).squeeze(1)
 
-    def _update_right_env(self, right_env: torch.Tensor, site: int, configs: torch.Tensor) -> torch.Tensor:
+    def _update_right_environment(self, right_environment: torch.Tensor, site: int, configs: torch.Tensor) -> torch.Tensor:
         tensor = self.mps.site_tensors[site].data
         selected_matrices = tensor[:, configs[:, site], :].permute(1, 0, 2)
-        return torch.bmm(selected_matrices, right_env.unsqueeze(2)).squeeze(2)
+        return torch.bmm(selected_matrices, right_environment.unsqueeze(2)).squeeze(2)
     
     # ------------------------------------------------------------------
     #  Numerical helpers
@@ -189,7 +189,7 @@ class DMRGTrainer:
         """
         """
         abs_psi = psi_v.abs()
-        small = abs_psi < eps
+        is_near_zero = abs_psi < eps
         
         if psi_v.is_complex():
             safe_abs = torch.where(
@@ -198,11 +198,11 @@ class DMRGTrainer:
             phase = psi_v / safe_abs.to(psi_v.dtype)
             unit_phase = torch.ones_like(psi_v)
             phase = torch.where(abs_psi > 0, phase, unit_phase)
-            replacement = phase * eps
-            return torch.where(small, replacement, psi_v)
+            near_zero_replacement = phase * eps
+            return torch.where(is_near_zero, near_zero_replacement, psi_v)
         else:
             sign = torch.where(psi_v >= 0, torch.ones_like(psi_v), -torch.ones_like(psi_v))
-            return torch.where(small, sign * eps, psi_v)
+            return torch.where(is_near_zero, sign * eps, psi_v)
         
     @staticmethod
     def _z_floor(dtype: torch.dtype) -> float:
@@ -218,7 +218,7 @@ class DMRGTrainer:
     def _compute_gradient(
         self,
         k: int,
-        theta: torch.Tensor,
+        merged_tensor: torch.Tensor,
         left_env: torch.Tensor,
         right_env: torch.Tensor,
         configurations: torch.Tensor,
@@ -232,42 +232,42 @@ class DMRGTrainer:
         physical_dim = self.mps.physical_dim
         batch_size = configurations.shape[0]
 
-        z_floor = self._z_floor(theta.dtype)
-        Z = (theta.conj() * theta).real.sum().to(torch.float64)
-        Z_safe = Z.clamp_min(z_floor).to(theta.real.dtype if theta.is_complex() else theta.dtype)
-        term1 = 2.0 * theta / Z_safe
+        z_floor = self._z_floor(merged_tensor.dtype)
+        Z = (merged_tensor.conj() * merged_tensor).real.sum().to(torch.float64)
+        Z_safe = Z.clamp_min(z_floor).to(merged_tensor.real.dtype if merged_tensor.is_complex() else merged_tensor.dtype)
+        partition_function_term = 2.0 * merged_tensor / Z_safe
 
-        v_k = configurations[:, k]
-        v_k1 = configurations[:, k + 1]
+        configuration_values_first = configurations[:, k]
+        configuration_values_second = configurations[:, k + 1]
 
-        theta_selected = theta[:, v_k, v_k1, :].permute(1, 0, 2)
-        psi_v = torch.einsum("ba,bac,bc->b", left_env, theta_selected, right_env)
+        merged_tensor_selected = merged_tensor[:, configuration_values_first, configuration_values_second, :].permute(1, 0, 2)
+        psi_value = torch.einsum("ba,bac,bc->b", left_env, merged_tensor_selected, right_env)
         
-        psi_safe = self._safe_psi(psi_v, eps=z_floor)
+        psi_safe = self._safe_psi(psi_value, eps=z_floor)
  
-        D_l, _, _, D_r = theta.shape
+        bond_dim_left, _, _, bond_dim_right = merged_tensor.shape
  
-        if theta.is_complex():
-            L_w = left_env.conj() / psi_safe.conj().unsqueeze(1)
-            R_w = right_env.conj()
+        if merged_tensor.is_complex():
+            left_weighted = left_env.conj() / psi_safe.conj().unsqueeze(1)
+            right_weighted = right_env.conj()
         else:
-            L_w = left_env / psi_safe.unsqueeze(1)
-            R_w = right_env
+            left_weighted = left_env / psi_safe.unsqueeze(1)
+            right_weighted = right_env
  
-        contributions = L_w.unsqueeze(2) * R_w.unsqueeze(1)
+        contributions = left_weighted.unsqueeze(2) * right_weighted.unsqueeze(1)
  
-        flat_idx = v_k * physical_dim + v_k1
-        term2_flat = torch.zeros(physical_dim * physical_dim, D_l, D_r,
-                                 dtype=theta.dtype, device=theta.device)
-        term2_flat.index_add_(0, flat_idx, contributions)
+        flattened_indices = configuration_values_first * physical_dim + configuration_values_second
+        data_term_flattened = torch.zeros(physical_dim * physical_dim, bond_dim_left, bond_dim_right,
+                                 dtype=merged_tensor.dtype, device=merged_tensor.device)
+        data_term_flattened.index_add_(0, flattened_indices, contributions)
  
-        term2 = (term2_flat
-                 .view(physical_dim, physical_dim, D_l, D_r)
+        data_term = (data_term_flattened
+                 .view(physical_dim, physical_dim, bond_dim_left, bond_dim_right)
                  .permute(2, 0, 1, 3)
                  .contiguous())
-        term2 = (2.0 / batch_size) * term2
+        data_term = (2.0 / batch_size) * data_term
  
-        return term1 - term2
+        return partition_function_term - data_term
     
     # ------------------------------------------------------------------
     #  Sweep
@@ -279,75 +279,75 @@ class DMRGTrainer:
         configurations: torch.Tensor,
         direction: str,
         lr: float,
-        left_envs: List[torch.Tensor],
-        right_envs: List[torch.Tensor],
+        left_environments: List[torch.Tensor],
+        right_environments: List[torch.Tensor],
         max_bond_dim: int,
     ) -> None:
         num_sites = self.mps.num_sites
         cfg = self.config
 
-        bonds = (
+        bond_indices = (
             range(num_sites - 2, -1, -1) if direction == "left"
             else range(0, num_sites - 1)
         )
 
-        grad_norms: List[torch.Tensor] = []
-        n_skipped_nan = 0
+        gradient_norms: List[torch.Tensor] = []
+        num_skipped_nan = 0
         z_floor = self._z_floor(self.mps.dtype)
 
         if cfg.adaptive_lr:
-            plateau_factor_t = torch.tensor(
+            plateau_factor_tensor = torch.tensor(
                 cfg.plateau_factor, device=configurations.device,
                 dtype=self.mps.dtype,
             )
-            unit_t = torch.tensor(
+            unit_tensor = torch.tensor(
                 1.0, device=configurations.device, dtype=self.mps.dtype,
             )
 
-        for k in bonds:
-            theta = self.mps.merge_sites(k)
-            left_env = left_envs[k]
-            right_env = right_envs[k + 1]
+        for k in bond_indices:
+            merged_tensor = self.mps.merge_sites(k)
+            left_environment = left_environments[k]
+            right_environment = right_environments[k + 1]
 
-            updated = False
+            was_updated = False
             for _ in range(cfg.num_descent_steps):
-                grad = self._compute_gradient(k, theta, left_env, right_env, configurations)
+                gradient = self._compute_gradient(k, merged_tensor, left_environment, right_environment, configurations)
 
-                if not torch.isfinite(grad).all():
-                    n_skipped_nan += 1
+                if not torch.isfinite(gradient).all():
+                    num_skipped_nan += 1
                     continue
 
-                grad_norm = grad.norm()
-                grad_norms.append(grad_norm)
+                gradient_norm = gradient.norm()
+                gradient_norms.append(gradient_norm)
 
                 if cfg.adaptive_lr:
-                    theta_norm = theta.norm().clamp_min(z_floor)
-                    relative_grad = grad_norm / theta_norm
+                    merged_tensor_norm = merged_tensor.norm().clamp_min(z_floor)
+                    relative_gradient_norm = gradient_norm / merged_tensor_norm
                     
-                    boost = torch.where(
-                        relative_grad < cfg.plateau_threshold,
-                        plateau_factor_t,
-                        unit_t,
+                    plateau_boost = torch.where(
+                        relative_gradient_norm < cfg.plateau_threshold,
+                        plateau_factor_tensor,
+                        unit_tensor,
                     )
-                    theta = theta - (lr * boost) * grad
+                    merged_tensor = merged_tensor - (lr * plateau_boost) * gradient
                 else:
-                    theta = theta - lr * grad
-                updated = True
+                    merged_tensor = merged_tensor - lr * gradient
+                was_updated = True
 
-            if updated:
+            if was_updated:
                 self.mps.split_and_truncate(
-                    k, theta, direction, max_bond_dim, cfg.svd_cutoff
+                    k, merged_tensor, direction, max_bond_dim, cfg.svd_cutoff
                 )
 
             if direction == "right" and k + 1 < num_sites - 1:
-                left_envs[k + 1] = self._update_left_env(left_envs[k], k, configurations)
+                left_environments[k + 1] = self._update_left_environment(left_environments[k], k, configurations)
             elif direction == "left" and k > 0:
-                right_envs[k] = self._update_right_env(right_envs[k + 1], k + 1, configurations)
+                right_environments[k] = self._update_right_environment(right_environments[k + 1], k + 1, configurations)
 
-        max_grad = (
-            torch.stack(grad_norms).max().item() if grad_norms else 0.0
+        max_gradient_norm = (
+            torch.stack(gradient_norms).max().item() if gradient_norms else 0.0
         )
-        return {"max_grad_norm": max_grad, "n_skipped_nan": n_skipped_nan}
+        return {"max_grad_norm": max_gradient_norm, "n_skipped_nan": num_skipped_nan}
     
     # ------------------------------------------------------------------
     #  Evaluation
@@ -355,31 +355,31 @@ class DMRGTrainer:
 
     @torch.no_grad()
     def _evaluate_nll(self, data: torch.Tensor) -> float:
-        cap = self.config.eval_max_samples
-        if cap <= 0 or len(data) <= cap:
+        max_samples_cap = self.config.eval_max_samples
+        if max_samples_cap <= 0 or len(data) <= max_samples_cap:
             return self.mps.nll(data, batch_size=self.config.batch_size).item()
  
-        idx = self._randperm_like(len(data), data.device)[:cap]
-        return self.mps.nll(data[idx], batch_size=self.config.batch_size).item()
+        sampled_indices = self._randperm_like(len(data), data.device)[:cap]
+        return self.mps.nll(data[sampled_indices], batch_size=self.config.batch_size).item()
     
-    def _randperm_like(self, n: int, device: torch.device) -> torch.Tensor:
+    def _randperm_like(self, num_elements: int, device: torch.device) -> torch.Tensor:
         """Reproducible randperm honoring ``self._generator``."""
         if self._generator_device.type == device.type:
-            return torch.randperm(n, generator=self._generator, device=device)
-        idx = torch.randperm(
-            n, generator=self._generator, device=self._generator_device
+            return torch.randperm(num_elements, generator=self._generator, device=device)
+        indices = torch.randperm(
+            num_elements, generator=self._generator, device=self._generator_device
         )
-        return idx.to(device)
+        return indices.to(device)
     
     # ------------------------------------------------------------------
     #  Bond-dim schedule
     # ------------------------------------------------------------------
     
     def _bond_dim_for_loop(self, loop: int) -> int:
-        sched = self.config.max_bond_dim_schedule
-        if sched is None:
+        schedule = self.config.max_bond_dim_schedule
+        if schedule is None:
             return int(self.config.max_bond_dim)
-        value = int(sched(loop))
+        value = int(schedule(loop))
         if value < 1:
             raise ValueError(
                 f"max_bond_dim_schedule returned {value} at loop={loop}; "
@@ -429,12 +429,12 @@ class DMRGTrainer:
         if (loop + 1) % cfg.checkpoint_every != 0:
             return None
 
-        cp_dir = Path(cfg.checkpoint_dir)
-        cp_dir.mkdir(parents=True, exist_ok=True)
-        mps_path = cp_dir / f"mps_loop_{loop:04d}.pt"
-        state_path = cp_dir / f"trainer_loop_{loop:04d}.pt"
+        checkpoint_directory = Path(cfg.checkpoint_dir)
+        checkpoint_directory.mkdir(parents=True, exist_ok=True)
+        mps_checkpoint_path = checkpoint_directory / f"mps_loop_{loop:04d}.pt"
+        trainer_state_path = checkpoint_directory / f"trainer_loop_{loop:04d}.pt"
 
-        self.mps.save(str(mps_path))
+        self.mps.save(str(mps_checkpoint_path))
 
         payload = {
             "format_version": _TRAINER_STATE_VERSION,
@@ -446,8 +446,8 @@ class DMRGTrainer:
             "generator_state": self._generator.get_state(),
             "generator_device": self._generator_device.type,
         }
-        torch.save(payload, str(state_path))
-        return {"mps_path": str(mps_path), "trainer_state_path": str(state_path)}
+        torch.save(payload, str(trainer_state_path))
+        return {"mps_checkpoint_path": str(mps_checkpoint_path), "trainer_state_path": str(trainer_state_path)}
     
     def _serializable_config(self) -> DMRGConfig:
         """Return a copy of the config with non-picklable fields stripped.
@@ -479,10 +479,10 @@ class DMRGTrainer:
                 f"{_TRAINER_STATE_VERSION}."
             )
 
-        cfg_dict = dict(payload["config"])
-        cfg_dict["max_bond_dim_schedule"] = max_bond_dim_schedule
-        cfg = DMRGConfig(**cfg_dict)
-        trainer = cls(mps, cfg)
+        config_dict = dict(payload["config"])
+        config_dict["max_bond_dim_schedule"] = max_bond_dim_schedule
+        config = DMRGConfig(**config_dict)
+        trainer = cls(mps, config)
         trainer._generator.set_state(payload["generator_state"])
 
         resume_state: Dict[str, Any] = {
@@ -532,9 +532,9 @@ class DMRGTrainer:
         history: List[Dict] = []
 
         if cfg.batches_per_loop > 0:
-            n_batches = cfg.batches_per_loop
+            num_batches = cfg.batches_per_loop
         else:
-            n_batches = max(1, (len(train_data) + cfg.batch_size - 1) // cfg.batch_size)
+            num_batches = max(1, (len(train_data) + cfg.batch_size - 1) // cfg.batch_size)
 
         natural_batches_per_epoch = max(
             1, (len(train_data) + cfg.batch_size - 1) // cfg.batch_size
@@ -548,43 +548,43 @@ class DMRGTrainer:
                 t_loop_start = time.monotonic()
                 max_bond_dim = self._bond_dim_for_loop(loop)
 
-                perm = self._randperm_like(len(train_data), train_data.device)
-                stochastic_max_grad = 0.0
-                n_skipped_nan = 0
+                permutation = self._randperm_like(len(train_data), train_data.device)
+                stochastic_max_gradient_norm = 0.0
+                num_skipped_nan = 0
 
-                for b in range(n_batches):
-                    if b > 0 and b % natural_batches_per_epoch == 0:
-                        perm = self._randperm_like(
+                for batch_index in range(num_batches):
+                    if batch_index > 0 and batch_index % natural_batches_per_epoch == 0:
+                        permutation = self._randperm_like(
                             len(train_data), train_data.device
                         )
 
-                    start = (b % natural_batches_per_epoch) * cfg.batch_size
-                    idx = perm[start:start + cfg.batch_size]
-                    if len(idx) < 2:
+                    batch_start = (batch_index % natural_batches_per_epoch) * cfg.batch_size
+                    batch_indices = permutation[batch_start:batch_start + cfg.batch_size]
+                    if len(batch_indices) < 2:
                         continue
-                    batch = train_data[idx]
+                    batch = train_data[batch_indices]
 
-                    left_envs = self._build_left_envs(batch)
-                    right_envs = self._build_right_envs(batch)
-                    stats_r = self._sweep(batch, "right", lr,left_envs, right_envs, max_bond_dim)
+                    left_environments = self._build_left_environments(batch)
+                    right_environments = self._build_right_environments(batch)
+                    stats_right_sweep = self._sweep(batch, "right", lr,left_environments, right_environments, max_bond_dim)
 
-                    left_envs = self._build_left_envs(batch)
-                    right_envs = self._build_right_envs(batch)
-                    stats_l = self._sweep(batch, "left", lr, left_envs, right_envs, max_bond_dim)
+                    left_environments = self._build_left_environments(batch)
+                    right_environments = self._build_right_environments(batch)
+                    stats_left_sweep = self._sweep(batch, "left", lr, left_environments, right_environments, max_bond_dim)
 
-                    stochastic_max_grad = max(stochastic_max_grad, stats_r["max_grad_norm"], stats_l["max_grad_norm"])
+                    stochastic_max_gradient_norm = max(stochastic_max_gradient_norm, stats_right_sweep["max_grad_norm"], stats_left_sweep["max_grad_norm"])
 
-                    n_skipped_nan += (
-                        stats_r["n_skipped_nan"] + stats_l["n_skipped_nan"]
+                    num_skipped_nan += (
+                        stats_right_sweep["n_skipped_nan"] + stats_left_sweep["n_skipped_nan"]
                     )
 
                     if cfg.stochastic:
                             break
                     
-                if n_skipped_nan > 0:
+                if num_skipped_nan > 0:
                     logger.warning(
                         "loop %d: skipped %d non-finite gradient updates.",
-                        loop, n_skipped_nan,
+                        loop, num_skipped_nan,
                     )
     
                 train_nll = self._evaluate_nll(train_data)
@@ -595,17 +595,17 @@ class DMRGTrainer:
                     "lr": lr,
                     "bond_dims": list(self.mps.bond_dims),
                     "max_bond_dim_cap": max_bond_dim,
-                    "max_grad_norm": stochastic_max_grad,
-                    "n_skipped_nan": n_skipped_nan,
+                    "max_grad_norm": stochastic_max_gradient_norm,
+                    "n_skipped_nan": num_skipped_nan,
                     "elapsed_s": time.monotonic() - t_loop_start,
                     "wallclock_s": time.monotonic() - t_start,
                 }
                 if val_data is not None:
                     record["val_nll"] = self._evaluate_nll(val_data)
     
-                cp_paths = self._maybe_checkpoint(loop, lr, wait, best_metric)
-                if cp_paths is not None:
-                    record.update(cp_paths)
+                checkpoint_paths = self._maybe_checkpoint(loop, lr, wait, best_metric)
+                if checkpoint_paths is not None:
+                    record.update(checkpoint_paths)
     
                 history.append(record)
                 self._write_log(record)
@@ -613,7 +613,7 @@ class DMRGTrainer:
                 logger.info(
                     "loop %d/%d  train_nll=%.4f  lr=%.2e  max_grad=%.2e  bond_dims=%s",
                     loop, cfg.num_loops - 1, train_nll, lr,
-                    stochastic_max_grad, self.mps.bond_dims,
+                    stochastic_max_gradient_norm, self.mps.bond_dims,
                 )
 
                 if not math.isfinite(train_nll):

@@ -1,0 +1,144 @@
+{
+  "train": {
+    "name": "train",
+    "n_rows": 125973,
+    "n_cols": 45,
+    "n_normal": 67343,
+    "n_attack": 58630,
+    "attack_pct": 46.54171925730117,
+    "family_counts": {
+      "normal": 67343,
+      "dos": 45927,
+      "probe": 11656,
+      "r2l": 995,
+      "u2r": 52
+    },
+    "top_labels": {
+      "normal": 67343,
+      "neptune": 41214,
+      "satan": 3633,
+      "ipsweep": 3599,
+      "portsweep": 2931,
+      "smurf": 2646,
+      "nmap": 1493,
+      "back": 956,
+      "teardrop": 892,
+      "warezclient": 890,
+      "pod": 201,
+      "guess_passwd": 53,
+      "buffer_overflow": 30,
+      "warezmaster": 20,
+      "land": 18
+    },
+    "n_missing_total": 0,
+    "categorical_cardinality": {
+      "protocol_type": 3,
+      "service": 70,
+      "flag": 11
+    },
+    "zero_variance_features": [
+      "num_outbound_cmds"
+    ]
+  },
+  "test": {
+    "name": "test",
+    "n_rows": 22544,
+    "n_cols": 45,
+    "n_normal": 9711,
+    "n_attack": 12833,
+    "attack_pct": 56.92423704755145,
+    "family_counts": {
+      "normal": 9711,
+      "dos": 7460,
+      "r2l": 2885,
+      "probe": 2421,
+      "u2r": 67
+    },
+    "top_labels": {
+      "normal": 9711,
+      "neptune": 4657,
+      "guess_passwd": 1231,
+      "mscan": 996,
+      "warezmaster": 944,
+      "apache2": 737,
+      "satan": 735,
+      "processtable": 685,
+      "smurf": 665,
+      "back": 359,
+      "snmpguess": 331,
+      "saint": 319,
+      "mailbomb": 293,
+      "snmpgetattack": 178,
+      "portsweep": 157
+    },
+    "n_missing_total": 0,
+    "categorical_cardinality": {
+      "protocol_type": 3,
+      "service": 64,
+      "flag": 11
+    },
+    "zero_variance_features": [
+      "num_outbound_cmds"
+    ]
+  },
+  "schema": {
+    "columns": [
+      "duration",
+      "protocol_type",
+      "service",
+      "flag",
+      "src_bytes",
+      "dst_bytes",
+      "land",
+      "wrong_fragment",
+      "urgent",
+      "hot",
+      "num_failed_logins",
+      "logged_in",
+      "num_compromised",
+      "root_shell",
+      "su_attempted",
+      "num_root",
+      "num_file_creations",
+      "num_shells",
+      "num_access_files",
+      "num_outbound_cmds",
+      "is_host_login",
+      "is_guest_login",
+      "count",
+      "srv_count",
+      "serror_rate",
+      "srv_serror_rate",
+      "rerror_rate",
+      "srv_rerror_rate",
+      "same_srv_rate",
+      "diff_srv_rate",
+      "srv_diff_host_rate",
+      "dst_host_count",
+      "dst_host_srv_count",
+      "dst_host_same_srv_rate",
+      "dst_host_diff_srv_rate",
+      "dst_host_same_src_port_rate",
+      "dst_host_srv_diff_host_rate",
+      "dst_host_serror_rate",
+      "dst_host_srv_serror_rate",
+      "dst_host_rerror_rate",
+      "dst_host_srv_rerror_rate",
+      "label",
+      "difficulty"
+    ],
+    "categorical": [
+      "protocol_type",
+      "service",
+      "flag"
+    ],
+    "binary": [
+      "land",
+      "logged_in",
+      "root_shell",
+      "su_attempted",
+      "is_host_login",
+      "is_guest_login"
+    ]
+  }
+}

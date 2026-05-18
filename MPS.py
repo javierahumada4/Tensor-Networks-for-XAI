@@ -1078,7 +1078,7 @@ class MPS(nn.Module):
         if preserve_state:
             tensor_backup = [parameter.data.clone() for parameter in self.site_tensors]
             try:
-                singular_values = self.left_canonicalize(
+                singular_values_per_bond  = self.left_canonicalize(
                     truncate=True, max_bond_dim=max_bond_dim, cutoff=cutoff
                 )
             finally:
@@ -1491,7 +1491,7 @@ class MPS(nn.Module):
                     weights = weights.real
                 weights = weights.clamp_min(self._numerical_floor)
                 conditional_probabilities = weights / weights.sum(dim=1, keepdim=True).clamp_min(self._numerical_floor)
-                self._check_valid_probabilities(conditional_probabilities, site=k, ctx="sample_conditional_scattered")
+                self._check_valid_probabilities(conditional_probabilities, site=k, context="sample_conditional_scattered")
                 chosen = torch.multinomial(conditional_probabilities, 1).squeeze(1)
  
             samples[:, k] = chosen

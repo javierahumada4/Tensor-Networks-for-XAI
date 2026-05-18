@@ -347,7 +347,7 @@ class DMRGTrainer:
         max_gradient_norm = (
             torch.stack(gradient_norms).max().item() if gradient_norms else 0.0
         )
-        return {"max_grad_norm": max_gradient_norm, "n_skipped_nan": num_skipped_nan}
+        return {"max_gradient_norm": max_gradient_norm, "num_skipped_nan": num_skipped_nan}
     
     # ------------------------------------------------------------------
     #  Evaluation

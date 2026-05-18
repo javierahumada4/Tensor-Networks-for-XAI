@@ -329,7 +329,7 @@ class MPS(nn.Module):
     @property
     def num_parameters(self) -> int:
         """Total real parameter count (complex tensors counted as 2 reals)."""
-        num_real_parameters = sum(t.numel() for t in self.site_tensors)
+        num_real_parameters = sum(site_tensor.numel() for site_tensor in self.site_tensors)
         if self.dtype in (torch.complex64, torch.complex128):
             num_real_parameters *= 2
         return num_real_parameters
@@ -1223,7 +1223,7 @@ class MPS(nn.Module):
         squared_norms = self._abs_squared(matrices)
         probabilities = squared_norms.sum(dim=1)
         probabilities = probabilities / probabilities.sum().clamp_min(self._numerical_floor)
-        self._check_valid_probabilities(probabilities, site=N - 1, ctx="sample")
+        self._check_valid_probabilities(probabilities, site=N - 1, context="sample")
  
         chosen = torch.multinomial(
             probabilities.unsqueeze(0).expand(num_samples, -1), 1
@@ -1242,7 +1242,7 @@ class MPS(nn.Module):
             squared_amplitudes = self._abs_squared(candidates)
             conditional_probabilities = squared_amplitudes.sum(dim=2)
             conditional_probabilities = conditional_probabilities / conditional_probabilities.sum(dim=1, keepdim=True).clamp_min(self._numerical_floor)
-            self._check_valid_probabilities(conditional_probabilities, site=k, ctx="sample")
+            self._check_valid_probabilities(conditional_probabilities, site=k, context="sample")
  
             chosen = torch.multinomial(conditional_probabilities, 1).squeeze(1)
             samples[:, k] = chosen
@@ -1309,7 +1309,7 @@ class MPS(nn.Module):
             if min_value < 0 or max_value >= self.physical_dim:
                 raise MPSShapeError(
                     f"known values at fixed positions must be in "
-                    f"[0, {self.physical_dim}), got range [{lo}, {hi}]"
+                    f"[0, {self.physical_dim}), got range [{min_value}, {max_value}]"
                 )
  
         free_positions = (~mask).nonzero(as_tuple=False).flatten()
@@ -1352,7 +1352,7 @@ class MPS(nn.Module):
             squared_norms = self._abs_squared(matrices)
             probabilities = squared_norms.sum(dim=1)
             probabilities = probabilities / probabilities.sum().clamp_min(self._numerical_floor)
-            self._check_valid_probabilities(probabilities, site=N - 1, ctx="sample_conditional_RL")
+            self._check_valid_probabilities(probabilities, site=N - 1, context="sample_conditional_RL")
             chosen = torch.multinomial(
                 probabilities.unsqueeze(0).expand(num_samples, -1), 1
             ).squeeze(1)
@@ -1372,7 +1372,7 @@ class MPS(nn.Module):
                 squared_amplitudes = self._abs_squared(candidates)
                 conditional_probabilities = squared_amplitudes.sum(dim=2)
                 conditional_probabilities = conditional_probabilities / conditional_probabilities.sum(dim=1, keepdim=True).clamp_min(self._numerical_floor)
-                self._check_valid_probabilities(conditional_probabilities, site=k, ctx="sample_conditional_RL")
+                self._check_valid_probabilities(conditional_probabilities, site=k, context="sample_conditional_RL")
                 chosen = torch.multinomial(conditional_probabilities, 1).squeeze(1)
  
             samples[:, k] = chosen
@@ -1407,7 +1407,7 @@ class MPS(nn.Module):
             squared_norms = self._abs_squared(matrices)
             probabilities = squared_norms.sum(dim=1)
             probabilities = probabilities / probabilities.sum().clamp_min(self._numerical_floor)
-            self._check_valid_probabilities(probabilities, site=0, ctx="sample_conditional_LR")
+            self._check_valid_probabilities(probabilities, site=0, context="sample_conditional_LR")
             chosen = torch.multinomial(
                 probabilities.unsqueeze(0).expand(num_samples, -1), 1
             ).squeeze(1)
@@ -1427,7 +1427,7 @@ class MPS(nn.Module):
                 squared_amplitudes = self._abs_squared(candidates)
                 conditional_probabilities = squared_amplitudes.sum(dim=2)
                 conditional_probabilities = conditional_probabilities / conditional_probabilities.sum(dim=1, keepdim=True).clamp_min(self._numerical_floor)
-                self._check_valid_probabilities(conditional_probabilities, site=k, ctx="sample_conditional_LR")
+                self._check_valid_probabilities(conditional_probabilities, site=k, context="sample_conditional_LR")
                 chosen = torch.multinomial(conditional_probabilities, 1).squeeze(1)
  
             samples[:, k] = chosen

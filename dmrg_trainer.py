@@ -170,14 +170,14 @@ class DMRGTrainer:
 
         return environments
 
-    def _update_left_environment(self, left_environment: torch.Tensor, site: int, configs: torch.Tensor) -> torch.Tensor:
+    def _update_left_environment(self, left_environment: torch.Tensor, site: int, configurations: torch.Tensor) -> torch.Tensor:
         tensor = self.mps.site_tensors[site].data
-        selected_matrices = tensor[:, configs[:, site], :].permute(1, 0, 2)
+        selected_matrices = tensor[:, configurations[:, site], :].permute(1, 0, 2)
         return torch.bmm(left_environment.unsqueeze(1), selected_matrices).squeeze(1)
 
-    def _update_right_environment(self, right_environment: torch.Tensor, site: int, configs: torch.Tensor) -> torch.Tensor:
+    def _update_right_environment(self, right_environment: torch.Tensor, site: int, configurations: torch.Tensor) -> torch.Tensor:
         tensor = self.mps.site_tensors[site].data
-        selected_matrices = tensor[:, configs[:, site], :].permute(1, 0, 2)
+        selected_matrices = tensor[:, configurations[:, site], :].permute(1, 0, 2)
         return torch.bmm(selected_matrices, right_environment.unsqueeze(2)).squeeze(2)
     
     # ------------------------------------------------------------------
@@ -219,8 +219,8 @@ class DMRGTrainer:
         self,
         k: int,
         merged_tensor: torch.Tensor,
-        left_env: torch.Tensor,
-        right_env: torch.Tensor,
+        left_environment: torch.Tensor,
+        right_environment: torch.Tensor,
         configurations: torch.Tensor,
     ) -> torch.Tensor:
         """
@@ -241,18 +241,18 @@ class DMRGTrainer:
         configuration_values_second = configurations[:, k + 1]
 
         merged_tensor_selected = merged_tensor[:, configuration_values_first, configuration_values_second, :].permute(1, 0, 2)
-        psi_value = torch.einsum("ba,bac,bc->b", left_env, merged_tensor_selected, right_env)
+        psi_value = torch.einsum("ba,bac,bc->b", left_environment, merged_tensor_selected, right_environment)
         
         psi_safe = self._safe_psi(psi_value, eps=z_floor)
  
         bond_dim_left, _, _, bond_dim_right = merged_tensor.shape
  
         if merged_tensor.is_complex():
-            left_weighted = left_env.conj() / psi_safe.conj().unsqueeze(1)
-            right_weighted = right_env.conj()
+            left_weighted = left_environment.conj() / psi_safe.conj().unsqueeze(1)
+            right_weighted = right_environment.conj()
         else:
-            left_weighted = left_env / psi_safe.unsqueeze(1)
-            right_weighted = right_env
+            left_weighted = left_environment / psi_safe.unsqueeze(1)
+            right_weighted = right_environment
  
         contributions = left_weighted.unsqueeze(2) * right_weighted.unsqueeze(1)
  
@@ -359,7 +359,7 @@ class DMRGTrainer:
         if max_samples_cap <= 0 or len(data) <= max_samples_cap:
             return self.mps.nll(data, batch_size=self.config.batch_size).item()
  
-        sampled_indices = self._randperm_like(len(data), data.device)[:cap]
+        sampled_indices = self._randperm_like(len(data), data.device)[:max_samples_cap]
         return self.mps.nll(data[sampled_indices], batch_size=self.config.batch_size).item()
     
     def _randperm_like(self, num_elements: int, device: torch.device) -> torch.Tensor:
@@ -572,10 +572,10 @@ class DMRGTrainer:
                     right_environments = self._build_right_environments(batch)
                     stats_left_sweep = self._sweep(batch, "left", lr, left_environments, right_environments, max_bond_dim)
 
-                    stochastic_max_gradient_norm = max(stochastic_max_gradient_norm, stats_right_sweep["max_grad_norm"], stats_left_sweep["max_grad_norm"])
+                    stochastic_max_gradient_norm = max(stochastic_max_gradient_norm, stats_right_sweep["max_gradient_norm"], stats_left_sweep["max_gradient_norm"])
 
                     num_skipped_nan += (
-                        stats_right_sweep["n_skipped_nan"] + stats_left_sweep["n_skipped_nan"]
+                        stats_right_sweep["num_skipped_nan"] + stats_left_sweep["num_skipped_nan"]
                     )
 
                     if cfg.stochastic:
@@ -595,8 +595,8 @@ class DMRGTrainer:
                     "lr": lr,
                     "bond_dims": list(self.mps.bond_dims),
                     "max_bond_dim_cap": max_bond_dim,
-                    "max_grad_norm": stochastic_max_gradient_norm,
-                    "n_skipped_nan": num_skipped_nan,
+                    "max_gradient_norm": stochastic_max_gradient_norm,
+                    "num_skipped_nan": num_skipped_nan,
                     "elapsed_s": time.monotonic() - t_loop_start,
                     "wallclock_s": time.monotonic() - t_start,
                 }
@@ -611,7 +611,7 @@ class DMRGTrainer:
                 self._write_log(record)
 
                 logger.info(
-                    "loop %d/%d  train_nll=%.4f  lr=%.2e  max_grad=%.2e  bond_dims=%s",
+                    "loop %d/%d  train_nll=%.4f  lr=%.2e  max_gradient_norm=%.2e  bond_dims=%s",
                     loop, cfg.num_loops - 1, train_nll, lr,
                     stochastic_max_gradient_norm, self.mps.bond_dims,
                 )

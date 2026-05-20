@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import pickle
 import sys
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -430,6 +431,17 @@ def main(data_dir: Path) -> None:
         f"Schema: {len(encoder.specs)} sites, "
         f"sum(d)={sum(physical_dims)}, max(d)={max(physical_dims)}"
     )
+
+    kind_counts = Counter(s.kind for s in encoder.specs)
+    log1p_counts = Counter(
+        s.log1p for s in encoder.specs if s.kind == "numeric"
+    )
+    print(f"  by kind: {dict(kind_counts)}")
+    if kind_counts.get("numeric", 0):
+        print(
+            f"  numeric: log1p=True={log1p_counts.get(True, 0)}, "
+            f"log1p=False={log1p_counts.get(False, 0)}"
+        )
 
     torch.save(train_X, data_dir / "train_X.pt")
     torch.save(test_X, data_dir / "test_X.pt")

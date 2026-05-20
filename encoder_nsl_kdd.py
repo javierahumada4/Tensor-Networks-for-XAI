@@ -404,6 +404,7 @@ def build_meta(df: pd.DataFrame) -> Dict[str, torch.Tensor]:
 def main(data_dir: Path) -> None:
     train = load_split(data_dir / "KDDTrain+.txt")
     test = load_split(data_dir / "KDDTest+.txt")
+    print(f"Loaded train {len(train):,}  test {len(test):,}")
 
     encoder = NSLKDDEncoder(
         target_d_numeric=4,
@@ -424,6 +425,11 @@ def main(data_dir: Path) -> None:
                     f"{split_name}: site {k} ({encoder.feature_names[k]}) "
                     f"has range [{lo}, {hi}] outside [0, {d})"
                 )
+            
+    print(
+        f"Schema: {len(encoder.specs)} sites, "
+        f"sum(d)={sum(physical_dims)}, max(d)={max(physical_dims)}"
+    )
 
     torch.save(train_X, data_dir / "train_X.pt")
     torch.save(test_X, data_dir / "test_X.pt")
@@ -433,6 +439,8 @@ def main(data_dir: Path) -> None:
 
     schema_json = data_dir / "encoding_schema.json"
     schema_json.write_text(json.dumps(encoder.schema_dict(), indent=2))
+
+    print(f"Wrote artefacts to {data_dir}/ (train_X.pt, test_X.pt, train_meta.pt, test_meta.pt, encoder.pkl, encoding_schema.json)")
 
 if __name__ == "__main__":
     data_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("./nsl_kdd")

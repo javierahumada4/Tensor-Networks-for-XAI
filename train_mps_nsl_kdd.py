@@ -23,6 +23,7 @@ import json
 import logging
 import sys
 from pathlib import Path
+from typing import Optional
 
 import torch
 
@@ -112,7 +113,7 @@ def load_normal_train(data_dir: Path) -> torch.Tensor:
 
 def split_train_val(
     x: torch.Tensor, val_fraction: float, seed: int
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
     """Reproducible random normal partition -> (train, val)."""
     if not (0.0 <= val_fraction < 1.0):
         raise ValueError("val_fraction must be in [0, 1)")
@@ -170,10 +171,9 @@ def main(data_dir: Path) -> None:
     check_columns_within_dims(x_normal, physical_dims)
 
     train_data, val_data = split_train_val(x_normal, VAL_FRACTION, SEED)
-    logger.info(
-        "partition: %d training, %d validation (both normal-only)",
-        len(train_data), len(val_data),
-    )
+    n_val = 0 if val_data is None else len(val_data)
+    logger.info("partition: %d training, %d validation (both normal-only)",
+                len(train_data), n_val)
 
     # --- model -------------------------------------------------------
     num_sites = len(physical_dims)

@@ -278,6 +278,8 @@ class NSLKDDEncoder:
                     f"NaN bins for feature {spec.name!r}; edges={spec.edges}"
                 )
             return out
+        
+        raise ValueError(f"unknown FeatureSpec.kind: {spec.kind!r}")
 
     def _encode_categorical(self, spec: FeatureSpec, x: pd.Series) -> np.ndarray:
         if not hasattr(spec, "_vocab_map") or spec._vocab_map is None:

@@ -394,11 +394,11 @@ class DMRGTrainer:
     #  Logging
     # ------------------------------------------------------------------
     
-    def _open_log(self) -> None:
+    def _open_log(self, resuming: bool = False) -> None:
         if self.config.log_path is None:
             return
         Path(self.config.log_path).parent.mkdir(parents=True, exist_ok=True)
-        self._log_file = open(self.config.log_path, "w", encoding="utf-8")
+        self._log_file = open(self.config.log_path, "a" if resuming else "w", encoding="utf-8")
  
     def _close_log(self) -> None:
         if self._log_file is not None:
@@ -544,7 +544,7 @@ class DMRGTrainer:
         )
 
         self._open_log()
-        t_start = time.monotonic()
+        t_start = time.monotonic(resuming=(resume_state is not None))
 
         try:
             for loop in range(loop_start, cfg.num_loops):

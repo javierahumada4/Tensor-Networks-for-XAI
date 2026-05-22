@@ -77,6 +77,13 @@ class FeatureSpec:
 
 
 # ----------------------------------------------------------------------
+#  Exceptions
+# ----------------------------------------------------------------------
+
+class EncodingError(ValueError):
+    """Encoded data violates the schema (e.g. a column outside [0, d))."""
+
+# ----------------------------------------------------------------------
 # Encoder
 # ----------------------------------------------------------------------
 
@@ -149,7 +156,7 @@ class NSLKDDEncoder:
         if col in CATEGORICAL_COLS:
             vocab_seen = sorted(x_full.astype(str).unique().tolist())
             if "UNKNOWN" in vocab_seen:
-                raise ValueError(
+                raise EncodingError(
                     f"'UNKNOWN' appears as a real category in column "
                     f"{col!r}; choose a different sentinel or rename "
                     f"the category before fitting."
@@ -273,7 +280,7 @@ class NSLKDDEncoder:
                 arr = np.log1p(arr)
             out = pd.cut(arr, bins=spec.edges, labels=False, include_lowest=True).astype(np.int64)
             if np.isnan(out.astype(float)).any():
-                raise RuntimeError(
+                raise EncodingError(
                     f"NaN bins for feature {spec.name!r}; edges={spec.edges}"
                 )
             return out
@@ -397,7 +404,7 @@ def main(data_dir: Path) -> None:
         col_min = X.min(dim=0).values
         for k, (lo, hi, d) in enumerate(zip(col_min.tolist(), col_max.tolist(), physical_dims)):
             if lo < 0 or hi >= d:
-                raise RuntimeError(
+                raise EncodingError(
                     f"{split_name}: site {k} ({encoder.feature_names[k]}) "
                     f"has range [{lo}, {hi}] outside [0, {d})"
                 )

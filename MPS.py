@@ -330,7 +330,7 @@ class MPS(nn.Module):
         model = cls(
             num_sites=config["num_sites"],
             bond_dim=config["bond_dim"],
-            physical_dim=config["physical_dims"],
+            physical_dims=config["physical_dims"],
             dtype=dtype,
             _skip_init=True,
         )
@@ -1183,7 +1183,6 @@ class MPS(nn.Module):
         Full N×N mutual-information matrix in one pass.
         """
         N = self.num_sites
-        physical_dim = self.physical_dim
  
         left, right = self._cached_environments()
  

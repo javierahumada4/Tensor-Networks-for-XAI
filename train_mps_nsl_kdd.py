@@ -140,11 +140,15 @@ def load_physical_dims(data_dir: Path) -> list[int]:
 
 def check_columns_within_dims(x: torch.Tensor, physical_dims: list[int]) -> None:
     """Checks that each column falls in [0, d_k); fails early if not."""
+    if x.dim() != 2:
+            raise ValueError(f"X must be 2D, got shape {tuple(x.shape)}")
     if x.shape[1] != len(physical_dims):
         raise ValueError(
             f"X has {x.shape[1]} sites but the schema declares "
             f"{len(physical_dims)}."
         )
+    if x.dtype != torch.long:
+            raise ValueError(f"X dtype must be long, got {x.dtype}")
     col_min = x.min(dim=0).values
     col_max = x.max(dim=0).values
     for site, (lo, hi, d) in enumerate(

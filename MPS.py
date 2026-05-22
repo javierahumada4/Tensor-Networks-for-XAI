@@ -74,7 +74,7 @@ class MPS(nn.Module):
         else:
             self.site_tensors = self._normal_init(init_std)
 
-    def _randn(self, *shape) -> torch.Tensor:
+    def _randn(self, *shape) -> nn.ParameterList:
         """
         Generates real or complex Gaussian tensors depending on dtype.
         Ensures E[|z|^2] = 1 for complex tensors.

@@ -285,7 +285,7 @@ class DMRGTrainer:
         left_environments: List[torch.Tensor],
         right_environments: List[torch.Tensor],
         max_bond_dim: int,
-    ) -> None:
+    ) -> Dict[str, Any]:
         num_sites = self.mps.num_sites
         cfg = self.config
 

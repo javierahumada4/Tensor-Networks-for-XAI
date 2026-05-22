@@ -289,28 +289,22 @@ class NSLKDDEncoder:
             real_values = [v for v in spec.vocab if v is not None]
             sample = real_values[0]
             if isinstance(sample, int):
-                values = x.astype(float).round().astype(int).to_numpy()
+                values = x.astype(float).round().astype(int)
             else:
-                values = x.astype(float).to_numpy()
+                values = x.astype(float)
             other_idx = mapping[None]
-            out = np.empty(len(values), dtype=np.int64)
-            for i, v in enumerate(values):
-                idx = mapping.get(v, other_idx)
-                out[i] = idx
-            return out
+            codes = values.map(mapping)
+            return codes.fillna(other_idx).astype(np.int64).to_numpy()
 
         if spec.kind == "categorical":
-            values = x.to_numpy()
             unknown_idx = mapping.get("UNKNOWN")
             if unknown_idx is None:
                 raise RuntimeError(
                     f"Feature {spec.name!r} has kind='categorical' but no "
                     "UNKNOWN slot in its vocab; refit the encoder."
                 )
-            out = np.empty(len(values), dtype=np.int64)
-            for i, v in enumerate(values):
-                out[i] = mapping.get(v, unknown_idx)
-            return out
+            codes = x.map(mapping)
+            return codes.fillna(unknown_idx).astype(np.int64).to_numpy()
 
     # ------------------------------------------------------------------
     # Convenience

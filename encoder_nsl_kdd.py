@@ -5,7 +5,6 @@ NSL-KDD encoder
 from __future__ import annotations
 
 import json
-import pickle
 import sys
 from collections import Counter
 from dataclasses import dataclass
@@ -350,26 +349,6 @@ class NSLKDDEncoder:
             "features": out,
         }
 
-    # ------------------------------------------------------------------
-    # Persistence
-    # ------------------------------------------------------------------
-
-    def save(self, path: str) -> None:
-        for s in self.specs:
-            if hasattr(s, "_vocab_map"):
-                delattr(s, "_vocab_map")
-        with open(path, "wb") as f:
-            pickle.dump(self, f)
-
-    @classmethod
-    def load(cls, path: str) -> "NSLKDDEncoder":
-        with open(path, "rb") as f:
-            obj = pickle.load(f)
-        if not isinstance(obj, cls):
-            raise TypeError(f"File at {path} is not a NSLKDDEncoder")
-        return obj
-
-
 # ----------------------------------------------------------------------
 # I/O helpers
 # ----------------------------------------------------------------------
@@ -449,13 +428,11 @@ def main(data_dir: Path) -> None:
     torch.save(test_X, data_dir / "test_X.pt")
     torch.save(build_meta(train), data_dir / "train_meta.pt")
     torch.save(build_meta(test), data_dir / "test_meta.pt")
-    encoder.save(str(data_dir / "encoder.pkl"))
 
     schema_json = data_dir / "encoding_schema.json"
     schema_json.write_text(json.dumps(encoder.schema_dict(), indent=2))
 
-    print(f"Wrote artefacts to {data_dir}/ (train_X.pt, test_X.pt, train_meta.pt, test_meta.pt, encoder.pkl, encoding_schema.json)")
-
+    print(f"Wrote artefacts to {data_dir}/ (train_X.pt, test_X.pt, train_meta.pt, test_meta.pt, encoding_schema.json)")
 if __name__ == "__main__":
     data_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("./nsl_kdd")
     main(data_dir)

@@ -208,6 +208,27 @@ class MPS(nn.Module):
         """
         return A.permute(1, 0, 2)
     
+    def select_matrices(
+        self, site: int, values: torch.Tensor
+    ) -> torch.Tensor:
+        """Return the per-sample transfer matrices of ``site`` for ``values``.
+
+        For each entry ``v`` in ``values``, picks the slice ``A[:, v, :]`` of
+        this site's tensor (shape ``D_{site-1} x D_site``) and stacks them
+        along a leading batch axis.
+        """
+        if not 0 <= site < self.num_sites:
+            raise IndexError(
+                f"site {site} out of range [0, {self.num_sites})"
+            )
+        if values.dim() != 1:
+            raise ValueError(
+                f"values must be 1-D, got shape {tuple(values.shape)}"
+            )
+        if values.dtype != torch.long:
+            values = values.long()
+        return self._as_matrices(self.site_tensors[site][:, values, :])
+    
     @staticmethod
     def _abs_squared(x: torch.Tensor) -> torch.Tensor:
         """

@@ -157,9 +157,7 @@ class DMRGTrainer:
         environments[0] = torch.ones(batch_size, 1, dtype=self.mps.dtype, device=configurations.device)
 
         for site in range(num_sites - 1):
-            tensor = self.mps.site_tensors[site].data
-            values = configurations[:, site]
-            selected_matrices = tensor[:, values, :].permute(1, 0, 2)
+            selected_matrices = self.mps.select_matrices(site, configurations[:, site])
 
             environments[site + 1] = torch.bmm(environments[site].unsqueeze(1), selected_matrices).squeeze(1)
 
@@ -175,22 +173,18 @@ class DMRGTrainer:
         environments[num_sites - 1] = torch.ones(batch_size, 1, dtype=self.mps.dtype, device=configurations.device)
 
         for site in range(num_sites - 1, 0, -1):
-            tensor = self.mps.site_tensors[site].data
-            values = configurations[:, site]
-            selected_matrices = tensor[:, values, :].permute(1, 0, 2)
+            selected_matrices = self.mps.select_matrices(site, configurations[:, site])
 
             environments[site - 1] = torch.bmm(selected_matrices, environments[site].unsqueeze(2)).squeeze(2)
 
         return environments
 
     def _update_left_environment(self, left_environment: torch.Tensor, site: int, configurations: torch.Tensor) -> torch.Tensor:
-        tensor = self.mps.site_tensors[site].data
-        selected_matrices = tensor[:, configurations[:, site], :].permute(1, 0, 2)
+        selected_matrices = self.mps.select_matrices(site, configurations[:, site])
         return torch.bmm(left_environment.unsqueeze(1), selected_matrices).squeeze(1)
 
     def _update_right_environment(self, right_environment: torch.Tensor, site: int, configurations: torch.Tensor) -> torch.Tensor:
-        tensor = self.mps.site_tensors[site].data
-        selected_matrices = tensor[:, configurations[:, site], :].permute(1, 0, 2)
+        selected_matrices = self.mps.select_matrices(site, configurations[:, site])
         return torch.bmm(selected_matrices, right_environment.unsqueeze(2)).squeeze(2)
     
     # ------------------------------------------------------------------

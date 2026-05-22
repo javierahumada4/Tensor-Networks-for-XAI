@@ -98,6 +98,7 @@ class DMRGConfig:
     stochastic: bool = False
     metric_for_stopping: str = "train_nll"
     eval_max_samples: int = 2048
+    full_eval_every: int = 0
     seed: Optional[int] = None
     checkpoint_every: int = 0
     checkpoint_dir: Optional[str] = None
@@ -118,6 +119,10 @@ class DMRGTrainer:
             raise ValueError(
                 f"max_bond_dim must be >= 1, got {self.config.max_bond_dim}"
             )
+        if self.config.full_eval_every < 0:
+            raise ValueError(
+                f"full_eval_every must be >= 0, got {self.config.full_eval_every}"
+            )
         
         try:
             device = next(self.mps.parameters()).device
@@ -130,7 +135,13 @@ class DMRGTrainer:
         if self.config.seed is not None:
             self._generator.manual_seed(int(self.config.seed))
 
+        self._eval_generator = torch.Generator(device=self._generator_device.type)
+        if self.config.seed is not None:
+            self._eval_generator.manual_seed(int(self.config.seed) + 0x5EED)
+
         self._log_file = None
+        
+        self._eval_index_cache: Dict[int, Optional[torch.Tensor]] = {}
 
     # ------------------------------------------------------------------
     #  Environment construction and updates
@@ -355,22 +366,49 @@ class DMRGTrainer:
     # ------------------------------------------------------------------
     #  Evaluation
     # ------------------------------------------------------------------
+    
+    def _full_nll(self, data: torch.Tensor) -> float:
+        """Exact NLL over the entire dataset."""
+        return self.mps.nll(data, batch_size=self.config.batch_size).item()
+    
+    def _control_eval_indices(self, data: torch.Tensor) -> Optional[torch.Tensor]:
+        """Indices of the fixed evaluation subset for ``data``.
+
+        Returns None when no subsampling applies (cap disabled or the set
+        already fits the cap), meaning the caller should use the full set.
+        The subset is drawn once per tensor and reused for every loop.
+        """
+        cap = self.config.eval_max_samples
+        if cap <= 0 or len(data) <= cap:
+            return None
+        key = id(data)
+        cached = self._eval_index_cache.get(key)
+        if cached is None:
+            cached = self._randperm_like(
+                len(data), data.device, generator=self._eval_generator
+            )[:cap].sort().values
+            self._eval_index_cache[key] = cached
+        return cached
 
     @torch.no_grad()
-    def _evaluate_nll(self, data: torch.Tensor) -> float:
-        max_samples_cap = self.config.eval_max_samples
-        if max_samples_cap <= 0 or len(data) <= max_samples_cap:
-            return self.mps.nll(data, batch_size=self.config.batch_size).item()
- 
-        sampled_indices = self._randperm_like(len(data), data.device)[:max_samples_cap]
-        return self.mps.nll(data[sampled_indices], batch_size=self.config.batch_size).item()
+    def _control_nll(self, data: torch.Tensor) -> float:
+        """NLL on the fixed evaluation subset (full set if no subsampling).
+
+        This is the metric driving the scheduler; it is stable across loops
+        because the subset never changes.
+        """
+        indices = self._control_eval_indices(data)
+        if indices is None:
+            return self._full_nll(data)
+        return self.mps.nll(data[indices], batch_size=self.config.batch_size).item()
     
-    def _randperm_like(self, num_elements: int, device: torch.device) -> torch.Tensor:
+    def _randperm_like(self, num_elements: int, device: torch.device, generator: Optional[torch.Generator] = None) -> torch.Tensor:
         """Reproducible randperm honoring ``self._generator``."""
+        gen = generator if generator is not None else self._generator
         if self._generator_device.type == device.type:
-            return torch.randperm(num_elements, generator=self._generator, device=device)
+            return torch.randperm(num_elements, generator=gen, device=device)
         indices = torch.randperm(
-            num_elements, generator=self._generator, device=self._generator_device
+            num_elements, generator=gen, device=self._generator_device
         )
         return indices.to(device)
     
@@ -511,6 +549,8 @@ class DMRGTrainer:
         cfg = self.config
         train_data, val_data = self._prepare_data(train_data, val_data)
 
+        self._eval_index_cache.clear()
+
         metric = cfg.metric_for_stopping
         if metric == "val_nll" and val_data is None:
             logger.warning(
@@ -590,7 +630,7 @@ class DMRGTrainer:
                         loop, num_skipped_nan,
                     )
     
-                train_nll = self._evaluate_nll(train_data)
+                train_nll = self._control_nll(train_data)
     
                 record: Dict[str, Any] = {
                     "loop": loop,
@@ -604,7 +644,16 @@ class DMRGTrainer:
                     "wallclock_s": time.monotonic() - t_start,
                 }
                 if val_data is not None:
-                    record["val_nll"] = self._evaluate_nll(val_data)
+                    record["val_nll"] = self._control_nll(val_data)
+
+                subsampled = cfg.eval_max_samples > 0
+                is_last_loop = loop == cfg.num_loops - 1
+                if subsampled and cfg.full_eval_every > 0 and (
+                    is_last_loop or (loop + 1) % cfg.full_eval_every == 0
+                ):
+                    record["train_nll_full"] = self._full_nll(train_data)
+                    if val_data is not None:
+                        record["val_nll_full"] = self._full_nll(val_data)
     
                 checkpoint_paths = self._maybe_checkpoint(loop, lr, wait, best_metric)
                 if checkpoint_paths is not None:

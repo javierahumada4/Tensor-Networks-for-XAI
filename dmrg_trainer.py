@@ -94,6 +94,7 @@ class DMRGConfig:
     adaptive_lr: bool = True
     plateau_factor: float = 10.0
     plateau_threshold: float = 1e-4
+    max_grad_norm: float = 0.0
     batches_per_loop: int = 0
     stochastic: bool = False
     metric_for_stopping: str = "train_nll"
@@ -122,6 +123,10 @@ class DMRGTrainer:
         if self.config.full_eval_every < 0:
             raise ValueError(
                 f"full_eval_every must be >= 0, got {self.config.full_eval_every}"
+            )
+        if self.config.max_grad_norm < 0:
+            raise ValueError(
+                f"max_grad_norm must be >= 0, got {self.config.max_grad_norm}"
             )
         
         try:
@@ -325,6 +330,13 @@ class DMRGTrainer:
                     num_skipped_nan += 1
                     continue
 
+                if cfg.max_grad_norm > 0.0:
+                    raw_norm = gradient.norm()
+                    if raw_norm > cfg.max_grad_norm:
+                        scale = (cfg.max_grad_norm / raw_norm).to(gradient.dtype)
+                        gradient = gradient * scale
+                        num_clipped += 1
+
                 gradient_norm = gradient.norm()
                 gradient_norms.append(gradient_norm)
 
@@ -355,7 +367,11 @@ class DMRGTrainer:
         max_gradient_norm = (
             torch.stack(gradient_norms).max().item() if gradient_norms else 0.0
         )
-        return {"max_gradient_norm": max_gradient_norm, "num_skipped_nan": num_skipped_nan}
+        return {
+            "max_gradient_norm": max_gradient_norm,
+            "num_skipped_nan": num_skipped_nan,
+            "num_clipped": num_clipped,
+        }
     
     # ------------------------------------------------------------------
     #  Evaluation
@@ -588,6 +604,7 @@ class DMRGTrainer:
                 permutation = self._randperm_like(len(train_data), train_data.device)
                 stochastic_max_gradient_norm = 0.0
                 num_skipped_nan = 0
+                num_clipped = 0
 
                 for batch_index in range(num_batches):
                     if batch_index > 0 and batch_index % natural_batches_per_epoch == 0:
@@ -614,6 +631,9 @@ class DMRGTrainer:
                     num_skipped_nan += (
                         stats_right_sweep["num_skipped_nan"] + stats_left_sweep["num_skipped_nan"]
                     )
+                    num_clipped += (
+                        stats_right_sweep["num_clipped"] + stats_left_sweep["num_clipped"]
+                    )
 
                     if cfg.stochastic:
                             break
@@ -622,6 +642,13 @@ class DMRGTrainer:
                     logger.warning(
                         "loop %d: skipped %d non-finite gradient updates.",
                         loop, num_skipped_nan,
+                    )
+                if num_clipped > 0:
+                    logger.warning(
+                        "loop %d: clipped %d gradient steps to max_grad_norm=%.2e. "
+                        "Frequent clipping suggests lr or svd_cutoff is too "
+                        "aggressive.",
+                        loop, num_clipped, cfg.max_grad_norm,
                     )
     
                 train_nll = self._control_nll(train_data)
@@ -634,6 +661,7 @@ class DMRGTrainer:
                     "max_bond_dim_cap": max_bond_dim,
                     "max_gradient_norm": stochastic_max_gradient_norm,
                     "num_skipped_nan": num_skipped_nan,
+                    "num_clipped": num_clipped,
                     "elapsed_s": time.monotonic() - t_loop_start,
                     "wallclock_s": time.monotonic() - t_start,
                 }

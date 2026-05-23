@@ -38,7 +38,6 @@ class MPS(nn.Module):
     """
     Matrix Product State with open boundary
     """
-    _LOG_FLOOR: float = 1e-300
 
     _discarded_weight_warn_threshold: float = 0.1
 
@@ -403,6 +402,13 @@ class MPS(nn.Module):
             return 1e-15
         return 1e-30
     
+    def _log_floor(self) -> float:
+        """Smallest |psi|^2 used to clamp before log(), dtype-dependent.
+        """
+        if self.dtype in (torch.float32, torch.complex64):
+            return 1e-30
+        return 1e-300
+    
     @property
     def is_homogeneous(self) -> bool:
         """True iff every site has the same physical dimension."""
@@ -446,9 +452,9 @@ class MPS(nn.Module):
  
         psi_rescaled = env.squeeze(1)
         if psi_rescaled.is_complex():
-            abs2 = (psi_rescaled.real.square() + psi_rescaled.imag.square()).clamp_min(self._LOG_FLOOR)
+            abs2 = (psi_rescaled.real.square() + psi_rescaled.imag.square()).clamp_min(self._log_floor)
         else:
-            abs2 = psi_rescaled.square().clamp_min(self._LOG_FLOOR)
+            abs2 = psi_rescaled.square().clamp_min(self._log_floor)
  
         log_abs2 = abs2.double().log() + 2.0 * log_scale
  

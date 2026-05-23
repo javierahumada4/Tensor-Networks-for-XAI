@@ -92,7 +92,6 @@ class DMRGConfig:
     adaptive_lr: bool = True
     plateau_factor: float = 10.0
     plateau_threshold: float = 1e-4
-    max_relative_step: float = 0.0
     batches_per_loop: int = 0
     stochastic: bool = False
     metric_for_stopping: str = "train_nll"
@@ -121,10 +120,6 @@ class DMRGTrainer:
         if self.config.full_eval_every < 0:
             raise ValueError(
                 f"full_eval_every must be >= 0, got {self.config.full_eval_every}"
-            )
-        if self.config.max_relative_step < 0 or self.config.max_relative_step > 1:
-            raise ValueError(
-                f"max_relative_step must be in range [0, 1], got {self.config.max_relative_step}"
             )
         if self.config.abort_after_dead_loops < 0:
             raise ValueError(
@@ -334,18 +329,6 @@ class DMRGTrainer:
                 if not torch.isfinite(gradient).all():
                     num_skipped_nan += 1
                     continue
-
-                if cfg.max_relative_step > 0.0:
-                    raw_norm = gradient.norm()
-                    theta_norm = merged_tensor.norm().clamp_min(z_floor)
-                    relative_grad_norm = raw_norm / theta_norm
-
-                    max_relative_grad_norm = cfg.max_relative_step / max(lr, 1e-30)
-
-                    if relative_grad_norm > max_relative_grad_norm:
-                        scale = max_relative_grad_norm / relative_grad_norm
-                        gradient = gradient * scale
-                        num_clipped += 1
 
                 gradient_norm = gradient.norm()
                 gradient_norms.append(gradient_norm)

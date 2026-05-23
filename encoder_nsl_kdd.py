@@ -7,7 +7,7 @@ from __future__ import annotations
 import json
 import sys
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -74,6 +74,10 @@ class FeatureSpec:
     edges: Optional[List[float]] = None      # for numeric quantile bins
     log1p: bool = False                      # apply log1p before binning?
     normal_value: Optional[float] = None     # reference value for binary normal-vs-different encoding
+
+    _vocab_map: Optional[Dict] = field(
+        default=None, repr=False, compare=False,
+    )
 
 
 # ----------------------------------------------------------------------
@@ -286,7 +290,7 @@ class NSLKDDEncoder:
         raise ValueError(f"unknown FeatureSpec.kind: {spec.kind!r}")
 
     def _encode_categorical(self, spec: FeatureSpec, x: pd.Series) -> np.ndarray:
-        if not hasattr(spec, "_vocab_map") or spec._vocab_map is None:
+        if spec._vocab_map is None:
             spec._vocab_map = {v: i for i, v in enumerate(spec.vocab)}
         mapping = spec._vocab_map
 

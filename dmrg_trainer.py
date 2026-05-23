@@ -14,9 +14,6 @@ import torch.nn as nn
 
 logger = logging.getLogger(__name__)
 
-_LOG_RECORD_VERSION: int = 1
-_TRAINER_STATE_VERSION: int = 1
-
 @dataclass
 class DMRGConfig:
     """Hyperparameters for DMRG training.
@@ -469,7 +466,6 @@ class DMRGTrainer:
     def _write_log(self, record: Dict) -> None:
         if self._log_file is None:
             return
-        record = {"format_version": _LOG_RECORD_VERSION, **record}
         self._log_file.write(json.dumps(record) + "\n")
         self._log_file.flush()
 
@@ -498,7 +494,6 @@ class DMRGTrainer:
         self.mps.save(str(mps_checkpoint_path))
 
         payload = {
-            "format_version": _TRAINER_STATE_VERSION,
             "loop": loop,
             "lr": lr,
             "wait": wait,
@@ -533,12 +528,6 @@ class DMRGTrainer:
         callable used originally if you want to keep the schedule.
         """
         payload = torch.load(trainer_state_path, weights_only=True)
-        if payload.get("format_version") != _TRAINER_STATE_VERSION:
-            raise ValueError(
-                f"Unknown trainer-state format_version "
-                f"{payload.get('format_version')!r}; expected "
-                f"{_TRAINER_STATE_VERSION}."
-            )
 
         config_dict = dict(payload["config"])
         config_dict["max_bond_dim_schedule"] = max_bond_dim_schedule

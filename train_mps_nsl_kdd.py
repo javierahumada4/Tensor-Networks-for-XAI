@@ -98,8 +98,8 @@ def load_normal_train(data_dir: Path) -> torch.Tensor:
             f"Missing {x_path.name} or {meta_path.name}. "
             "Run encoder_nsl_kdd.py first."
         )
-    x_all = torch.load(x_path)
-    meta = torch.load(meta_path)
+    x_all = torch.load(x_path, weights_only=True)
+    meta = torch.load(meta_path, weights_only=True)
     is_attack = meta["is_attack"]
 
     normal_mask = is_attack == 0

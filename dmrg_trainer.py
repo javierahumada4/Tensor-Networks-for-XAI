@@ -91,6 +91,7 @@ class DMRGConfig:
     lr_min: float = 1e-6
     patience: int = 5
     improvement_threshold: float = 1e-4
+    abort_after_dead_loops: int = 3
     adaptive_lr: bool = True
     plateau_factor: float = 10.0
     plateau_threshold: float = 1e-4
@@ -127,6 +128,11 @@ class DMRGTrainer:
         if self.config.max_grad_norm < 0:
             raise ValueError(
                 f"max_grad_norm must be >= 0, got {self.config.max_grad_norm}"
+            )
+        if self.config.abort_after_dead_loops < 0:
+            raise ValueError(
+                f"abort_after_dead_loops must be >= 0, got "
+                f"{self.config.abort_after_dead_loops}"
             )
         
         try:
@@ -306,6 +312,8 @@ class DMRGTrainer:
 
         gradient_norms: List[torch.Tensor] = []
         num_skipped_nan = 0
+        num_clipped = 0
+        num_updates = 0
         z_floor = self._z_floor(self.mps.dtype)
 
         if cfg.adaptive_lr:
@@ -353,6 +361,7 @@ class DMRGTrainer:
                 else:
                     merged_tensor = merged_tensor - lr * gradient
                 was_updated = True
+                num_updates += 1
 
             if was_updated:
                 self.mps.split_and_truncate(
@@ -371,6 +380,7 @@ class DMRGTrainer:
             "max_gradient_norm": max_gradient_norm,
             "num_skipped_nan": num_skipped_nan,
             "num_clipped": num_clipped,
+            "num_updates": num_updates,
         }
     
     # ------------------------------------------------------------------
@@ -583,6 +593,7 @@ class DMRGTrainer:
             best_metric = float("inf")
 
         history: List[Dict] = []
+        consecutive_dead_loops = 0
 
         if cfg.batches_per_loop > 0:
             num_batches = cfg.batches_per_loop
@@ -605,6 +616,7 @@ class DMRGTrainer:
                 stochastic_max_gradient_norm = 0.0
                 num_skipped_nan = 0
                 num_clipped = 0
+                num_updates = 0
 
                 for batch_index in range(num_batches):
                     if batch_index > 0 and batch_index % natural_batches_per_epoch == 0:
@@ -634,6 +646,9 @@ class DMRGTrainer:
                     num_clipped += (
                         stats_right_sweep["num_clipped"] + stats_left_sweep["num_clipped"]
                     )
+                    num_updates += (
+                        stats_right_sweep["num_updates"] + stats_left_sweep["num_updates"]
+                    )
 
                     if cfg.stochastic:
                             break
@@ -662,6 +677,7 @@ class DMRGTrainer:
                     "max_gradient_norm": stochastic_max_gradient_norm,
                     "num_skipped_nan": num_skipped_nan,
                     "num_clipped": num_clipped,
+                    "num_updates": num_updates,
                     "elapsed_s": time.monotonic() - t_loop_start,
                     "wallclock_s": time.monotonic() - t_start,
                 }
@@ -713,6 +729,25 @@ class DMRGTrainer:
                                 "stopping early.", lr, cfg.lr_min,
                             )
                             break
+                if num_updates == 0:
+                    consecutive_dead_loops += 1
+                    logger.error(
+                        "loop %d: 0 gradient updates applied "
+                        "(%d non-finite gradients skipped); the model did "
+                        "not change. Consecutive dead loops: %d.",
+                        loop, num_skipped_nan, consecutive_dead_loops,
+                    )
+                    if (cfg.abort_after_dead_loops > 0
+                            and consecutive_dead_loops >= cfg.abort_after_dead_loops):
+                        logger.error(
+                            "Aborting: %d consecutive dead loops "
+                            "(abort_after_dead_loops=%d). Every gradient was "
+                            "non-finite; training cannot progress.",
+                            consecutive_dead_loops, cfg.abort_after_dead_loops,
+                        )
+                        break
+                else:
+                    consecutive_dead_loops = 0
         finally:
             self._close_log()
 

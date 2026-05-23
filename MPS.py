@@ -74,6 +74,10 @@ class MPS(nn.Module):
         else:
             self.site_tensors = self._normal_init(init_std)
 
+        self._cached_left: Optional[List[torch.Tensor]] = None
+        self._cached_right: Optional[List[torch.Tensor]] = None
+        self._cache_valid: bool = False
+
     def _randn(self, *shape) -> nn.ParameterList:
         """
         Generates real or complex Gaussian tensors depending on dtype.
@@ -555,6 +559,7 @@ class MPS(nn.Module):
         scale = torch.exp(-0.5 * log_z / self.num_sites)
         for site_parameter in self.site_tensors:
             site_parameter.data = site_parameter.data * scale
+        self.invalidate_environment_cache()
 
     # ----------------------------------------------------------------------
     # Canonicalization and tensor manipulation
@@ -618,7 +623,9 @@ class MPS(nn.Module):
             )
         if truncate:
             self._validate_truncation(max_bond_dim, cutoff)
- 
+
+        self.invalidate_environment_cache()
+
         if not truncate:
             for site in range(up_to):
                 tensor = self.site_tensors[site].data
@@ -679,6 +686,8 @@ class MPS(nn.Module):
             )
         if truncate:
             self._validate_truncation(max_bond_dim, cutoff)
+
+        self.invalidate_environment_cache()
  
         if not truncate:
             for site in range(self.num_sites - 1, from_site - 1, -1):
@@ -789,6 +798,8 @@ class MPS(nn.Module):
             self.site_tensors[k].data = (U * singular_values.unsqueeze(0)).reshape(bond_dim_left, physical_dim_first, rank_kept)
             self.site_tensors[k + 1].data = Vh.reshape(rank_kept, physical_dim_second, bond_dim_right)
 
+        self.invalidate_environment_cache()
+
         return singular_values.detach().clone()
     
     @torch.no_grad()
@@ -840,6 +851,8 @@ class MPS(nn.Module):
                 f"permutation must be a permutation of range({self.num_sites}), got {permutation}"
             )
         self._validate_truncation(max_bond_dim, cutoff)
+
+        self.invalidate_environment_cache()
  
         target = [0] * self.num_sites
         for k, src in enumerate(permutation):
@@ -915,7 +928,7 @@ class MPS(nn.Module):
         self,
     ) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
         """Return cached envs if valid, otherwise build fresh ones (uncached)."""
-        if getattr(self, "_cache_valid", False):
+        if self._cache_valid:
             return self._cached_left, self._cached_right
         return self.transfer_environments_left(), self.transfer_environments_right()
     

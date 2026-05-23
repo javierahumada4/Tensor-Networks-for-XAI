@@ -654,6 +654,9 @@ class DMRGTrainer:
                         "aggressive.",
                         loop, num_clipped, cfg.max_grad_norm,
                     )
+
+                self.mps.normalize_state()
+                self.mps.right_canonicalize()
     
                 train_nll = self._control_nll(train_data)
     

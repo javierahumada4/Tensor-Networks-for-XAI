@@ -70,6 +70,7 @@ CONFIG = DMRGConfig(
     lr_shrink=0.7,
     lr_min=1e-6,
     patience=8,
+    max_grad_norm=5.0,
     improvement_threshold=1e-6,
 
     batch_size=1024,

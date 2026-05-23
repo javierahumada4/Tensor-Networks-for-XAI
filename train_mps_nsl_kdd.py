@@ -48,40 +48,45 @@ VAL_FRACTION = 0.10
 SEED = 0
 
 def bond_schedule(loop: int) -> int:
-    if loop < 5:
+    # Gentle ramp: no single-loop capacity jump larger than 2x.
+    if loop < 3:
+        return 4
+    if loop < 6:
+        return 8
+    if loop < 12:
         return 16
-    if loop < 15:
+    if loop < 22:
         return 32
-    if loop < 30:
+    if loop < 38:
         return 64
-    if loop < 50:
+    if loop < 58:
         return 96
     return 128
-
+ 
 CONFIG = DMRGConfig(
     num_loops=80,
-    num_descent_steps=6,
-
+    num_descent_steps=2,
+ 
     max_bond_dim=128,
     max_bond_dim_schedule=bond_schedule,
-    svd_cutoff=1e-10,
-
-    lr=2e-2,
+    svd_cutoff=1e-8,
+ 
+    lr=1e-3,
     lr_shrink=0.7,
     lr_min=1e-6,
     patience=8,
-    max_grad_norm=5.0,
-    improvement_threshold=1e-6,
-
+    max_relative_step=0.03,
+    improvement_threshold=1e-4,
+ 
     batch_size=1024,
     batches_per_loop=0,
     stochastic=False,
-
+ 
     adaptive_lr=False,
-
+ 
     metric_for_stopping="val_nll",
     eval_max_samples=0,
-
+ 
     seed=123,
     checkpoint_every=5,
     checkpoint_dir="./checkpoints",

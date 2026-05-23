@@ -92,7 +92,7 @@ class DMRGConfig:
     adaptive_lr: bool = True
     plateau_factor: float = 10.0
     plateau_threshold: float = 1e-4
-    max_grad_norm: float = 0.0
+    max_relative_step: float = 0.0
     batches_per_loop: int = 0
     stochastic: bool = False
     metric_for_stopping: str = "train_nll"
@@ -122,9 +122,9 @@ class DMRGTrainer:
             raise ValueError(
                 f"full_eval_every must be >= 0, got {self.config.full_eval_every}"
             )
-        if self.config.max_grad_norm < 0:
+        if self.config.max_relative_step < 0 or self.config.max_relative_step > 1:
             raise ValueError(
-                f"max_grad_norm must be >= 0, got {self.config.max_grad_norm}"
+                f"max_relative_step must be in range [0, 1], got {self.config.max_relative_step}"
             )
         if self.config.abort_after_dead_loops < 0:
             raise ValueError(
@@ -335,13 +335,15 @@ class DMRGTrainer:
                     num_skipped_nan += 1
                     continue
 
-                if cfg.max_grad_norm > 0.0:
+                if cfg.max_relative_step > 0.0:
                     raw_norm = gradient.norm()
                     theta_norm = merged_tensor.norm().clamp_min(z_floor)
-                    relative_norm = raw_norm / theta_norm
+                    relative_grad_norm = raw_norm / theta_norm
 
-                    if relative_norm > cfg.max_grad_norm:
-                        scale = cfg.max_grad_norm / relative_norm
+                    max_relative_grad_norm = cfg.max_relative_step / max(lr, 1e-30)
+
+                    if relative_grad_norm > max_relative_grad_norm:
+                        scale = max_relative_grad_norm / relative_grad_norm
                         gradient = gradient * scale
                         num_clipped += 1
 
@@ -651,12 +653,21 @@ class DMRGTrainer:
                         "loop %d: skipped %d non-finite gradient updates.",
                         loop, num_skipped_nan,
                     )
-                if num_clipped > 0:
+                clip_fraction = num_clipped / max(num_updates, 1)
+
+                if clip_fraction >= 0.25:
                     logger.warning(
-                        "loop %d: clipped %d gradient steps to max_grad_norm=%.2e. "
-                        "Frequent clipping suggests lr or svd_cutoff is too "
-                        "aggressive.",
-                        loop, num_clipped, cfg.max_grad_norm,
+                        "heavy gradient clipping: %d/%d updates clipped (%.2f%%)",
+                        num_clipped,
+                        num_updates,
+                        100.0 * clip_fraction,
+                    )
+                elif clip_fraction >= 0.05:
+                    logger.info(
+                        "moderate gradient clipping: %d/%d updates clipped (%.2f%%)",
+                        num_clipped,
+                        num_updates,
+                        100.0 * clip_fraction,
                     )
 
                 self.mps.normalize_state()

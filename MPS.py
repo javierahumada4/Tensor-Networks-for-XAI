@@ -531,7 +531,7 @@ class MPS(nn.Module):
         raise ValueError(f"Unsupported reduction: {reduction!r}. Use 'mean', 'sum', or 'none'.")
     
     @torch.no_grad()
-    def anomaly_score(self, configurations: torch.Tensor) -> torch.Tensor:
+    def anomaly_score(self, configurations, batch_size: Optional[int] = None):
         """
         Per-sample anomaly score, defined as the negative log-likelihood:
  
@@ -541,7 +541,7 @@ class MPS(nn.Module):
         learned model.  Used as the raw signal for thresholding in
         anomaly-detection pipelines.
         """
-        return -self.log_prob(configurations)
+        return -self.log_prob(configurations, batch_size=batch_size)
     
     @torch.no_grad()
     def normalize_state(self) -> None:

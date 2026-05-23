@@ -304,7 +304,6 @@ class DMRGTrainer:
 
         gradient_norms: List[torch.Tensor] = []
         num_skipped_nan = 0
-        num_clipped = 0
         num_updates = 0
         z_floor = self._z_floor(self.mps.dtype)
 
@@ -364,7 +363,6 @@ class DMRGTrainer:
         return {
             "max_gradient_norm": max_gradient_norm,
             "num_skipped_nan": num_skipped_nan,
-            "num_clipped": num_clipped,
             "num_updates": num_updates,
         }
     
@@ -593,7 +591,6 @@ class DMRGTrainer:
                 permutation = self._randperm_like(len(train_data), train_data.device)
                 stochastic_max_gradient_norm = 0.0
                 num_skipped_nan = 0
-                num_clipped = 0
                 num_updates = 0
 
                 for batch_index in range(num_batches):
@@ -621,9 +618,6 @@ class DMRGTrainer:
                     num_skipped_nan += (
                         stats_right_sweep["num_skipped_nan"] + stats_left_sweep["num_skipped_nan"]
                     )
-                    num_clipped += (
-                        stats_right_sweep["num_clipped"] + stats_left_sweep["num_clipped"]
-                    )
                     num_updates += (
                         stats_right_sweep["num_updates"] + stats_left_sweep["num_updates"]
                     )
@@ -635,22 +629,6 @@ class DMRGTrainer:
                     logger.warning(
                         "loop %d: skipped %d non-finite gradient updates.",
                         loop, num_skipped_nan,
-                    )
-                clip_fraction = num_clipped / max(num_updates, 1)
-
-                if clip_fraction >= 0.25:
-                    logger.warning(
-                        "heavy gradient clipping: %d/%d updates clipped (%.2f%%)",
-                        num_clipped,
-                        num_updates,
-                        100.0 * clip_fraction,
-                    )
-                elif clip_fraction >= 0.05:
-                    logger.info(
-                        "moderate gradient clipping: %d/%d updates clipped (%.2f%%)",
-                        num_clipped,
-                        num_updates,
-                        100.0 * clip_fraction,
                     )
 
                 self.mps.normalize_state()
@@ -666,7 +644,6 @@ class DMRGTrainer:
                     "max_bond_dim_cap": max_bond_dim,
                     "max_gradient_norm": stochastic_max_gradient_norm,
                     "num_skipped_nan": num_skipped_nan,
-                    "num_clipped": num_clipped,
                     "num_updates": num_updates,
                     "elapsed_s": time.monotonic() - t_loop_start,
                     "wallclock_s": time.monotonic() - t_start,

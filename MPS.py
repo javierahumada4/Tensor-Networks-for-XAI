@@ -308,6 +308,10 @@ class MPS(nn.Module):
             rebuilt_kwargs["dtype"] = new_dtype
         if new_device is not None:
             rebuilt_kwargs["device"] = new_device
+
+        if new_device is not None:
+            self.invalidate_environment_cache()
+
         return super().to(*positional, **rebuilt_kwargs)
     
     # ------------------------------------------------------------------

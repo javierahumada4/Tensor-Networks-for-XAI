@@ -281,7 +281,7 @@ class NSLKDDEncoder:
             if spec.log1p:
                 arr = np.log1p(arr)
             out = pd.cut(arr, bins=spec.edges, labels=False, include_lowest=True).astype(np.int64)
-            if np.isnan(out.astype(float)).any():
+            if np.isnan(out).any():
                 raise EncodingError(
                     f"NaN bins for feature {spec.name!r}; edges={spec.edges}"
                 )

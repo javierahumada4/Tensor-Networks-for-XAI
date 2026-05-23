@@ -593,8 +593,8 @@ class DMRGTrainer:
             1, (len(train_data) + cfg.batch_size - 1) // cfg.batch_size
         )
 
-        self._open_log()
-        t_start = time.monotonic(resuming=(resume_state is not None))
+        self._open_log(resuming=(resume_state is not None))
+        t_start = time.monotonic()
 
         try:
             for loop in range(loop_start, cfg.num_loops):

@@ -78,7 +78,7 @@ class MPS(nn.Module):
         self._cached_right: Optional[List[torch.Tensor]] = None
         self._cache_valid: bool = False
 
-    def _randn(self, *shape) -> nn.ParameterList:
+    def _randn(self, *shape) -> torch.Tensor:
         """
         Generates real or complex Gaussian tensors depending on dtype.
         Ensures E[|z|^2] = 1 for complex tensors.
@@ -110,7 +110,7 @@ class MPS(nn.Module):
 
         return nn.ParameterList(tensor_list)
     
-    def _empty_init(self) -> torch.Tensor:
+    def _empty_init(self) -> nn.ParameterList:
         tensor_list: List[nn.Parameter] = []
 
         left_tensor = torch.zeros(1, self.physical_dims[0], self.bond_dim, dtype=self.dtype)
@@ -408,28 +408,6 @@ class MPS(nn.Module):
     # ----------------------------------------------------------------------
     # Amplitudes, norms, probabilities
     # ----------------------------------------------------------------------
-    
-    def psi(self, configurations: torch.Tensor) -> torch.Tensor:
-        """
-        Computes the MPS amplitude Psi(v) for a batch of configurations.
-        """
-        if configurations.dtype != torch.long:
-            configurations = configurations.long()
-        self._validate_configurations(configurations)
-        batch_size = configurations.shape[0]
-        
-        tensor = self.site_tensors[0]
-        values = configurations[:, 0]
-        env = self._as_matrices(tensor[:, values, :])
-
-        for site in range(1, self.num_sites):
-            tensor = self.site_tensors[site]
-            values = configurations[:, site]
-            selected_matrices = self._as_matrices(tensor[:, values, :])
-
-            env = torch.bmm(env, selected_matrices)
-
-        return env.reshape(batch_size)
     
     def log_amplitude_squared(self, configurations: torch.Tensor) -> torch.Tensor:
         """

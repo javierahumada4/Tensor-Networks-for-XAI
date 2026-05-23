@@ -640,7 +640,7 @@ class DMRGTrainer:
                     )
 
                     if cfg.stochastic:
-                            break
+                        break
                     
                 if num_skipped_nan > 0:
                     logger.warning(

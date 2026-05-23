@@ -181,16 +181,20 @@ class MPS(nn.Module):
                     f"got range [{min_value}, {max_value}]"
                 )
             return
-        min_values = configurations.min(dim=0).values
-        max_values = configurations.max(dim=0).values
-        for k, physical_dim in enumerate(self.physical_dims):
-            min_value = min_values[k].item()
-            max_value = max_values[k].item()
-            if min_value < 0 or max_value >= physical_dim:
-                raise MPSShapeError(
-                    f"configurations[:, {k}] values must be in [0, {physical_dim}), "
-                    f"got range [{min_value}, {max_value}]"
-                )
+        col_min = configurations.min(dim=0).values
+        col_max = configurations.max(dim=0).values
+        dims = torch.tensor(
+            self.physical_dims, device=configurations.device, dtype=col_max.dtype
+        )
+        out_of_range = (col_min < 0) | (col_max >= dims)
+        if out_of_range.any():
+            bad_sites = out_of_range.nonzero(as_tuple=False).flatten().tolist()
+            details = "; ".join(
+                f"site {k}: range [{col_min[k].item()}, {col_max[k].item()}] "
+                f"outside [0, {self.physical_dims[k]})"
+                for k in bad_sites
+            )
+            raise MPSShapeError(f"configurations out of range -- {details}")
 
     def _validate_truncation(
         self, max_bond_dim: Optional[int], cutoff: float

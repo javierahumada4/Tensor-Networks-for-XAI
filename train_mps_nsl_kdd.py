@@ -149,7 +149,7 @@ def check_columns_within_dims(x: torch.Tensor, physical_dims: list[int]) -> None
             f"{len(physical_dims)}."
         )
     if x.dtype != torch.long:
-            raise ValueError(f"X dtype must be long, got {x.dtype}")
+        raise ValueError(f"X dtype must be long, got {x.dtype}")
     col_min = x.min(dim=0).values
     col_max = x.max(dim=0).values
     for site, (lo, hi, d) in enumerate(

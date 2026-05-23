@@ -141,7 +141,7 @@ class NSLKDDEncoder:
         for col in COLUMNS:
             if col in DROP_COLS or col in META_COLS:
                 continue
-            specs.append(self._fit_one(col, df_train[col], df_normal[col]))
+            specs.append(self._fit_one(col, df_normal[col]))
 
         self.specs = specs
         return self
@@ -149,12 +149,11 @@ class NSLKDDEncoder:
     def _fit_one(
         self,
         col: str,
-        x_full: pd.Series,
         x_normal: pd.Series,
     ) -> FeatureSpec:
         # (1) Categorical string columns
         if col in CATEGORICAL_COLS:
-            vocab_seen = sorted(x_full.astype(str).unique().tolist())
+            vocab_seen = sorted(x_normal.astype(str).unique().tolist())
             if "UNKNOWN" in vocab_seen:
                 raise EncodingError(
                     f"'UNKNOWN' appears as a real category in column "
@@ -166,7 +165,6 @@ class NSLKDDEncoder:
 
         # From here on, numeric features.
         x_normal = x_normal.astype(float)
-        x_full = x_full.astype(float)
 
         n_unique_normal = int(x_normal.nunique())
 
@@ -190,7 +188,7 @@ class NSLKDDEncoder:
 
         # (4) Few distinct values in train∩normal
         if n_unique_normal <= self.max_implicit_categorical:
-            vocab_int = sorted(x_full.dropna().unique().tolist())
+            vocab_int = sorted(x_normal.dropna().unique().tolist())
             if all(float(v).is_integer() for v in vocab_int):
                 vocab_int = [int(v) for v in vocab_int]
             vocab_with_other = vocab_int + [None]

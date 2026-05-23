@@ -337,8 +337,11 @@ class DMRGTrainer:
 
                 if cfg.max_grad_norm > 0.0:
                     raw_norm = gradient.norm()
-                    if raw_norm > cfg.max_grad_norm:
-                        scale = (cfg.max_grad_norm / raw_norm).to(gradient.dtype)
+                    theta_norm = merged_tensor.norm().clamp_min(z_floor)
+                    relative_norm = raw_norm / theta_norm
+
+                    if relative_norm > cfg.max_grad_norm:
+                        scale = cfg.max_grad_norm / relative_norm
                         gradient = gradient * scale
                         num_clipped += 1
 

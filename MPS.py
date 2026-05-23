@@ -402,6 +402,7 @@ class MPS(nn.Module):
             return 1e-15
         return 1e-30
     
+    @property
     def _log_floor(self) -> float:
         """Smallest |psi|^2 used to clamp before log(), dtype-dependent.
         """

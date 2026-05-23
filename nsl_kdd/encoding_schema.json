@@ -1,0 +1,480 @@
+{
+  "n_features": 40,
+  "physical_dims": [
+    2,
+    4,
+    27,
+    11,
+    4,
+    4,
+    2,
+    2,
+    2,
+    2,
+    2,
+    3,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    4,
+    4,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    3,
+    2,
+    2,
+    2,
+    3,
+    2,
+    2,
+    2,
+    2,
+    2
+  ],
+  "features": [
+    {
+      "site": 0,
+      "name": "duration",
+      "kind": "numeric",
+      "d": 2,
+      "edges": [
+        null,
+        0.0,
+        null
+      ],
+      "log1p": true
+    },
+    {
+      "site": 1,
+      "name": "protocol_type",
+      "kind": "categorical",
+      "d": 4,
+      "vocab": [
+        "icmp",
+        "tcp",
+        "udp",
+        "UNKNOWN"
+      ]
+    },
+    {
+      "site": 2,
+      "name": "service",
+      "kind": "categorical",
+      "d": 27,
+      "vocab": [
+        "IRC",
+        "X11",
+        "auth",
+        "domain",
+        "domain_u",
+        "eco_i",
+        "ecr_i",
+        "finger",
+        "ftp",
+        "ftp_data",
+        "http",
+        "imap4",
+        "ntp_u",
+        "other",
+        "pop_3",
+        "private",
+        "red_i",
+        "shell",
+        "smtp",
+        "ssh",
+        "telnet",
+        "tftp_u",
+        "tim_i",
+        "time",
+        "urh_i",
+        "urp_i",
+        "UNKNOWN"
+      ]
+    },
+    {
+      "site": 3,
+      "name": "flag",
+      "kind": "categorical",
+      "d": 11,
+      "vocab": [
+        "OTH",
+        "REJ",
+        "RSTO",
+        "RSTR",
+        "S0",
+        "S1",
+        "S2",
+        "S3",
+        "SF",
+        "SH",
+        "UNKNOWN"
+      ]
+    },
+    {
+      "site": 4,
+      "name": "src_bytes",
+      "kind": "numeric",
+      "d": 4,
+      "edges": [
+        null,
+        4.867534450455582,
+        5.455321115357702,
+        5.783825182329737,
+        null
+      ],
+      "log1p": true
+    },
+    {
+      "site": 5,
+      "name": "dst_bytes",
+      "kind": "numeric",
+      "d": 4,
+      "edges": [
+        null,
+        4.663439094112067,
+        5.940171252720432,
+        7.6290038896529575,
+        null
+      ],
+      "log1p": true
+    },
+    {
+      "site": 6,
+      "name": "land",
+      "kind": "constant_normal",
+      "d": 2,
+      "normal_value": 0.0
+    },
+    {
+      "site": 7,
+      "name": "wrong_fragment",
+      "kind": "constant_normal",
+      "d": 2,
+      "normal_value": 0.0
+    },
+    {
+      "site": 8,
+      "name": "urgent",
+      "kind": "constant_normal",
+      "d": 2,
+      "normal_value": 0.0
+    },
+    {
+      "site": 9,
+      "name": "hot",
+      "kind": "constant_normal",
+      "d": 2,
+      "normal_value": 0.0
+    },
+    {
+      "site": 10,
+      "name": "num_failed_logins",
+      "kind": "constant_normal",
+      "d": 2,
+      "normal_value": 0.0
+    },
+    {
+      "site": 11,
+      "name": "logged_in",
+      "kind": "discrete",
+      "d": 3,
+      "vocab": [
+        0,
+        1,
+        "OTHER"
+      ]
+    },
+    {
+      "site": 12,
+      "name": "num_compromised",
+      "kind": "constant_normal",
+      "d": 2,
+      "normal_value": 0.0
+    },
+    {
+      "site": 13,
+      "name": "root_shell",
+      "kind": "constant_normal",
+      "d": 2,
+      "normal_value": 0.0
+    },
+    {
+      "site": 14,
+      "name": "su_attempted",
+      "kind": "constant_normal",
+      "d": 2,
+      "normal_value": 0.0
+    },
+    {
+      "site": 15,
+      "name": "num_root",
+      "kind": "constant_normal",
+      "d": 2,
+      "normal_value": 0.0
+    },
+    {
+      "site": 16,
+      "name": "num_file_creations",
+      "kind": "constant_normal",
+      "d": 2,
+      "normal_value": 0.0
+    },
+    {
+      "site": 17,
+      "name": "num_shells",
+      "kind": "constant_normal",
+      "d": 2,
+      "normal_value": 0.0
+    },
+    {
+      "site": 18,
+      "name": "num_access_files",
+      "kind": "constant_normal",
+      "d": 2,
+      "normal_value": 0.0
+    },
+    {
+      "site": 19,
+      "name": "is_host_login",
+      "kind": "constant_normal",
+      "d": 2,
+      "normal_value": 0.0
+    },
+    {
+      "site": 20,
+      "name": "is_guest_login",
+      "kind": "constant_normal",
+      "d": 2,
+      "normal_value": 0.0
+    },
+    {
+      "site": 21,
+      "name": "count",
+      "kind": "numeric",
+      "d": 4,
+      "edges": [
+        null,
+        0.6931471805599453,
+        1.6094379124341003,
+        2.70805020110221,
+        null
+      ],
+      "log1p": true
+    },
+    {
+      "site": 22,
+      "name": "srv_count",
+      "kind": "numeric",
+      "d": 4,
+      "edges": [
+        null,
+        1.0986122886681096,
+        1.791759469228055,
+        2.9444389791664403,
+        null
+      ],
+      "log1p": true
+    },
+    {
+      "site": 23,
+      "name": "serror_rate",
+      "kind": "constant_normal",
+      "d": 2,
+      "normal_value": 0.0
+    },
+    {
+      "site": 24,
+      "name": "srv_serror_rate",
+      "kind": "constant_normal",
+      "d": 2,
+      "normal_value": 0.0
+    },
+    {
+      "site": 25,
+      "name": "rerror_rate",
+      "kind": "constant_normal",
+      "d": 2,
+      "normal_value": 0.0
+    },
+    {
+      "site": 26,
+      "name": "srv_rerror_rate",
+      "kind": "numeric",
+      "d": 2,
+      "edges": [
+        null,
+        0.0,
+        null
+      ],
+      "log1p": true
+    },
+    {
+      "site": 27,
+      "name": "same_srv_rate",
+      "kind": "numeric",
+      "d": 2,
+      "edges": [
+        null,
+        0.6931471805599453,
+        null
+      ],
+      "log1p": true
+    },
+    {
+      "site": 28,
+      "name": "diff_srv_rate",
+      "kind": "numeric",
+      "d": 2,
+      "edges": [
+        null,
+        0.0,
+        null
+      ],
+      "log1p": true
+    },
+    {
+      "site": 29,
+      "name": "srv_diff_host_rate",
+      "kind": "numeric",
+      "d": 2,
+      "edges": [
+        null,
+        0.10436001532424277,
+        null
+      ],
+      "log1p": true
+    },
+    {
+      "site": 30,
+      "name": "dst_host_count",
+      "kind": "numeric",
+      "d": 3,
+      "edges": [
+        null,
+        40.0,
+        156.0,
+        null
+      ]
+    },
+    {
+      "site": 31,
+      "name": "dst_host_srv_count",
+      "kind": "numeric",
+      "d": 2,
+      "edges": [
+        null,
+        4.804021044733257,
+        null
+      ],
+      "log1p": true
+    },
+    {
+      "site": 32,
+      "name": "dst_host_same_srv_rate",
+      "kind": "numeric",
+      "d": 2,
+      "edges": [
+        null,
+        0.5596157879354227,
+        null
+      ],
+      "log1p": true
+    },
+    {
+      "site": 33,
+      "name": "dst_host_diff_srv_rate",
+      "kind": "numeric",
+      "d": 2,
+      "edges": [
+        null,
+        0.019802627296179712,
+        null
+      ],
+      "log1p": true
+    },
+    {
+      "site": 34,
+      "name": "dst_host_same_src_port_rate",
+      "kind": "numeric",
+      "d": 3,
+      "edges": [
+        null,
+        0.009950330853168083,
+        0.07696104113612832,
+        null
+      ],
+      "log1p": true
+    },
+    {
+      "site": 35,
+      "name": "dst_host_srv_diff_host_rate",
+      "kind": "numeric",
+      "d": 2,
+      "edges": [
+        null,
+        0.0295588022415444,
+        null
+      ],
+      "log1p": true
+    },
+    {
+      "site": 36,
+      "name": "dst_host_serror_rate",
+      "kind": "numeric",
+      "d": 2,
+      "edges": [
+        null,
+        0.0,
+        null
+      ],
+      "log1p": true
+    },
+    {
+      "site": 37,
+      "name": "dst_host_srv_serror_rate",
+      "kind": "numeric",
+      "d": 2,
+      "edges": [
+        null,
+        0.0,
+        null
+      ],
+      "log1p": true
+    },
+    {
+      "site": 38,
+      "name": "dst_host_rerror_rate",
+      "kind": "numeric",
+      "d": 2,
+      "edges": [
+        null,
+        0.0,
+        null
+      ],
+      "log1p": true
+    },
+    {
+      "site": 39,
+      "name": "dst_host_srv_rerror_rate",
+      "kind": "numeric",
+      "d": 2,
+      "edges": [
+        null,
+        0.0,
+        null
+      ],
+      "log1p": true
+    }
+  ]
+}

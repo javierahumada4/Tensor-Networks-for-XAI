@@ -571,6 +571,7 @@ class DMRGTrainer:
             )
             metric = "train_nll"
 
+        self.mps.normalize_state()
         self.mps.right_canonicalize()
 
         if resume_state is not None:

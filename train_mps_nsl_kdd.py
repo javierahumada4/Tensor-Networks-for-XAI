@@ -45,7 +45,6 @@ logger = logging.getLogger("train_mps")
 DTYPE = torch.float64
 INIT_BOND_DIM = 2
 VAL_FRACTION = 0.10
-SEED = 0
 
 CONFIG = DMRGConfig(
     # training
@@ -158,14 +157,21 @@ def check_columns_within_dims(x: torch.Tensor, physical_dims: list[int]) -> None
 
 # ----------------------------------------------------------------------
 def main(data_dir: Path) -> None:
-    torch.manual_seed(SEED)
+    seed = CONFIG.seed if CONFIG.seed is not None else 0
+    torch.manual_seed(seed)
+
+    if INIT_BOND_DIM > CONFIG.init_bond_cap:
+        raise ValueError(
+            f"INIT_BOND_DIM ({INIT_BOND_DIM}) must be <= CONFIG.init_bond_cap "
+            f"({CONFIG.init_bond_cap}); the MPS cannot start larger than the cap."
+        )
 
     # --- data --------------------------------------------------------
     physical_dims = load_physical_dims(data_dir)
     x_normal = load_normal_train(data_dir)
     check_columns_within_dims(x_normal, physical_dims)
 
-    train_data, val_data = split_train_val(x_normal, VAL_FRACTION, SEED)
+    train_data, val_data = split_train_val(x_normal, VAL_FRACTION, seed)
     n_val = 0 if val_data is None else len(val_data)
     logger.info("partition: %d training, %d validation (both normal-only)",
                 len(train_data), n_val)

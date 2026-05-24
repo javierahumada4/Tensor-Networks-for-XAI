@@ -17,64 +17,6 @@ logger = logging.getLogger(__name__)
 @dataclass
 class DMRGConfig:
     """Hyperparameters for DMRG training.
-
-    Parameters
-    ----------
-    num_descent_steps : int
-        Number of gradient steps per bond per sweep.
-    max_bond_dim : int
-        Constant cap on the SVD truncation rank.  Used unless
-        ``max_bond_dim_schedule`` overrides it.
-    max_bond_dim_schedule : Optional[Callable[[int], int]]
-        Optional callable that returns the bond-dim cap for a given loop
-        index.  When provided, overrides ``max_bond_dim``.
-    svd_cutoff : float
-        Relative singular-value cutoff used inside the MPS SVD.
-    lr : float
-        Initial learning rate for the bond-wise gradient step.
-    num_loops : int
-        Number of full DMRG sweeps (right + left counts as one loop).
-    batch_size : int
-        Minibatch size used during sweeps.
-    lr_shrink, lr_min, patience : float, float, int
-        Patience-based LR scheduler.  When the monitored metric fails to
-        improve by ``improvement_threshold`` for ``patience`` consecutive
-        loops, ``lr`` is multiplied by ``lr_shrink``.  Training stops when
-        ``lr`` falls below ``lr_min``.
-    improvement_threshold : float
-        Minimum decrease in the monitored metric counted as an
-        improvement.
-    adaptive_lr : bool
-        If True, locally boost ``lr`` by ``plateau_factor`` when the
-        relative gradient norm at a bond drops below ``plateau_threshold``.
-        Disabled by default; see notes in `_sweep`.
-    plateau_factor, plateau_threshold : float, float
-        Parameters of the per-bond adaptive boost.
-    batches_per_loop : int
-        Number of minibatches per loop.  Zero means use the natural number
-        of batches that covers the training set once.
-    stochastic : bool
-        If True, only one minibatch per loop is used (legacy switch).
-    metric_for_stopping : str
-        Either "train_nll" or "val_nll".  Used by the patience-based
-        scheduler.  Falls back to "train_nll" if val_data is None.
-    eval_max_samples : int
-        Subsampling cap for NLL evaluation.  0 disables subsampling.
-    seed : Optional[int]
-        Seed for the RNG used in evaluation subsampling and minibatch
-        permutation.  When set, training is reproducible (modulo CUDA's
-        non-determinism in matmul/SVD; see torch.use_deterministic_algorithms).
-    checkpoint_every : int
-        If > 0, save the MPS and the trainer state every ``checkpoint_every``
-        loops.  Trainer state captures lr, patience counter, best metric and
-        the RNG state, so training can be resumed exactly with
-        :meth:`DMRGTrainer.resume`.
-    checkpoint_dir : Optional[str]
-        Directory for checkpoint files.  Caller is responsible for
-        validating this path; no sanitization is performed.
-    log_path : Optional[str]
-        Path to a JSONL log file.  Caller is responsible for validating
-        this path.
     """
 
     num_descent_steps: int = 1
@@ -89,17 +31,9 @@ class DMRGConfig:
     patience: int = 5
     improvement_threshold: float = 1e-4
     abort_after_dead_loops: int = 3
-    adaptive_lr: bool = True
-    plateau_factor: float = 10.0
-    plateau_threshold: float = 1e-4
     batches_per_loop: int = 0
-    stochastic: bool = False
     metric_for_stopping: str = "train_nll"
-    eval_max_samples: int = 2048
-    full_eval_every: int = 0
     seed: Optional[int] = None
-    checkpoint_every: int = 0
-    checkpoint_dir: Optional[str] = None
     log_path: Optional[str] = None
 
 
@@ -116,10 +50,6 @@ class DMRGTrainer:
         if self.config.max_bond_dim < 1:
             raise ValueError(
                 f"max_bond_dim must be >= 1, got {self.config.max_bond_dim}"
-            )
-        if self.config.full_eval_every < 0:
-            raise ValueError(
-                f"full_eval_every must be >= 0, got {self.config.full_eval_every}"
             )
         if self.config.abort_after_dead_loops < 0:
             raise ValueError(
@@ -138,13 +68,7 @@ class DMRGTrainer:
         if self.config.seed is not None:
             self._generator.manual_seed(int(self.config.seed))
 
-        self._eval_generator = torch.Generator(device=self._generator_device.type)
-        if self.config.seed is not None:
-            self._eval_generator.manual_seed(int(self.config.seed) + 0x5EED)
-
         self._log_file = None
-        
-        self._eval_index_cache: Dict[int, Optional[torch.Tensor]] = {}
 
     # ------------------------------------------------------------------
     #  Environment construction and updates
@@ -305,16 +229,6 @@ class DMRGTrainer:
         gradient_norms: List[torch.Tensor] = []
         num_skipped_nan = 0
         num_updates = 0
-        z_floor = self._z_floor(self.mps.dtype)
-
-        if cfg.adaptive_lr:
-            plateau_factor_tensor = torch.tensor(
-                cfg.plateau_factor, device=configurations.device,
-                dtype=self.mps.dtype,
-            )
-            unit_tensor = torch.tensor(
-                1.0, device=configurations.device, dtype=self.mps.dtype,
-            )
 
         for k in bond_indices:
             merged_tensor = self.mps.merge_sites(k)
@@ -332,18 +246,7 @@ class DMRGTrainer:
                 gradient_norm = gradient.norm()
                 gradient_norms.append(gradient_norm)
 
-                if cfg.adaptive_lr:
-                    merged_tensor_norm = merged_tensor.norm().clamp_min(z_floor)
-                    relative_gradient_norm = gradient_norm / merged_tensor_norm
-                    
-                    plateau_boost = torch.where(
-                        relative_gradient_norm < cfg.plateau_threshold,
-                        plateau_factor_tensor,
-                        unit_tensor,
-                    )
-                    merged_tensor = merged_tensor - (lr * plateau_boost) * gradient
-                else:
-                    merged_tensor = merged_tensor - lr * gradient
+                merged_tensor = merged_tensor - lr * gradient
                 was_updated = True
                 num_updates += 1
 
@@ -370,48 +273,16 @@ class DMRGTrainer:
     #  Evaluation
     # ------------------------------------------------------------------
     
-    def _full_nll(self, data: torch.Tensor) -> float:
+    def _control_nll(self, data: torch.Tensor) -> float:
         """Exact NLL over the entire dataset."""
         return self.mps.nll(data, batch_size=self.config.batch_size).item()
     
-    def _control_eval_indices(self, data: torch.Tensor) -> Optional[torch.Tensor]:
-        """Indices of the fixed evaluation subset for ``data``.
-
-        Returns None when no subsampling applies (cap disabled or the set
-        already fits the cap), meaning the caller should use the full set.
-        The subset is drawn once per tensor and reused for every loop.
-        """
-        cap = self.config.eval_max_samples
-        if cap <= 0 or len(data) <= cap:
-            return None
-        key = id(data)
-        cached = self._eval_index_cache.get(key)
-        if cached is None:
-            cached = self._randperm_like(
-                len(data), data.device, generator=self._eval_generator
-            )[:cap].sort().values
-            self._eval_index_cache[key] = cached
-        return cached
-
-    @torch.no_grad()
-    def _control_nll(self, data: torch.Tensor) -> float:
-        """NLL on the fixed evaluation subset (full set if no subsampling).
-
-        This is the metric driving the scheduler; it is stable across loops
-        because the subset never changes.
-        """
-        indices = self._control_eval_indices(data)
-        if indices is None:
-            return self._full_nll(data)
-        return self.mps.nll(data[indices], batch_size=self.config.batch_size).item()
-    
-    def _randperm_like(self, num_elements: int, device: torch.device, generator: Optional[torch.Generator] = None) -> torch.Tensor:
+    def _randperm_like(self, num_elements: int, device: torch.device) -> torch.Tensor:
         """Reproducible randperm honoring ``self._generator``."""
-        gen = generator if generator is not None else self._generator
         if self._generator_device.type == device.type:
-            return torch.randperm(num_elements, generator=gen, device=device)
+            return torch.randperm(num_elements, generator=self._generator, device=device)
         indices = torch.randperm(
-            num_elements, generator=gen, device=self._generator_device
+            num_elements, generator=self._generator, device=self._generator_device
         )
         return indices.to(device)
     
@@ -435,11 +306,11 @@ class DMRGTrainer:
     #  Logging
     # ------------------------------------------------------------------
     
-    def _open_log(self, resuming: bool = False) -> None:
+    def _open_log(self) -> None:
         if self.config.log_path is None:
             return
         Path(self.config.log_path).parent.mkdir(parents=True, exist_ok=True)
-        self._log_file = open(self.config.log_path, "a" if resuming else "w", encoding="utf-8")
+        self._log_file = open(self.config.log_path, "w", encoding="utf-8")
  
     def _close_log(self) -> None:
         if self._log_file is not None:
@@ -456,80 +327,6 @@ class DMRGTrainer:
         self._log_file.flush()
 
     # ------------------------------------------------------------------
-    #  Checkpoints (full trainer state, not just MPS)
-    # ------------------------------------------------------------------
- 
-    def _maybe_checkpoint(
-        self,
-        loop: int,
-        lr: float,
-        wait: int,
-        best_metric: float,
-    ) -> Optional[Dict[str, str]]:
-        cfg = self.config
-        if cfg.checkpoint_every <= 0 or cfg.checkpoint_dir is None:
-            return None
-        if (loop + 1) % cfg.checkpoint_every != 0:
-            return None
-
-        checkpoint_directory = Path(cfg.checkpoint_dir)
-        checkpoint_directory.mkdir(parents=True, exist_ok=True)
-        mps_checkpoint_path = checkpoint_directory / f"mps_loop_{loop:04d}.pt"
-        trainer_state_path = checkpoint_directory / f"trainer_loop_{loop:04d}.pt"
-
-        self.mps.save(str(mps_checkpoint_path))
-
-        payload = {
-            "loop": loop,
-            "lr": lr,
-            "wait": wait,
-            "best_metric": best_metric,
-            "config": dataclasses.asdict(self._serializable_config()),
-            "generator_state": self._generator.get_state(),
-            "generator_device": self._generator_device.type,
-        }
-        torch.save(payload, str(trainer_state_path))
-        return {"mps_checkpoint_path": str(mps_checkpoint_path), "trainer_state_path": str(trainer_state_path)}
-    
-    def _serializable_config(self) -> DMRGConfig:
-        """Return a copy of the config with non-picklable fields stripped.
-
-        ``max_bond_dim_schedule`` may be a closure that does not pickle
-        cleanly; we replace it with None in the serialized config and rely
-        on the caller passing the same callable when resuming.
-        """
-        return dataclasses.replace(self.config, max_bond_dim_schedule=None)
-    
-    @classmethod
-    def resume(
-        cls,
-        mps: nn.Module,
-        trainer_state_path: str,
-        max_bond_dim_schedule: Optional[Callable[[int], int]] = None,
-    ) -> Tuple["DMRGTrainer", Dict[str, Any]]:
-        """Reconstruct a trainer from a saved trainer-state file.
-
-        The MPS must be loaded separately (via ``MPS.load``) and passed in.
-        ``max_bond_dim_schedule`` cannot be serialized; pass the same
-        callable used originally if you want to keep the schedule.
-        """
-        payload = torch.load(trainer_state_path, weights_only=True)
-
-        config_dict = dict(payload["config"])
-        config_dict["max_bond_dim_schedule"] = max_bond_dim_schedule
-        config = DMRGConfig(**config_dict)
-        trainer = cls(mps, config)
-        trainer._generator.set_state(payload["generator_state"])
-
-        resume_state: Dict[str, Any] = {
-            "loop_start": int(payload["loop"]) + 1,
-            "lr": float(payload["lr"]),
-            "wait": int(payload["wait"]),
-            "best_metric": float(payload["best_metric"]),
-        }
-        return trainer, resume_state
-    
-    # ------------------------------------------------------------------
     #  Train loop
     # ------------------------------------------------------------------
     
@@ -538,13 +335,9 @@ class DMRGTrainer:
         self,
         train_data: torch.Tensor,
         val_data: Optional[torch.Tensor] = None,
-        *,
-        resume_state: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
         cfg = self.config
         train_data, val_data = self._prepare_data(train_data, val_data)
-
-        self._eval_index_cache.clear()
 
         metric = cfg.metric_for_stopping
         if metric == "val_nll" and val_data is None:
@@ -557,16 +350,10 @@ class DMRGTrainer:
         self.mps.normalize_state()
         self.mps.right_canonicalize()
 
-        if resume_state is not None:
-            loop_start = resume_state["loop_start"]
-            lr = resume_state["lr"]
-            wait = resume_state["wait"]
-            best_metric = resume_state["best_metric"]
-        else:
-            loop_start = 0
-            lr = cfg.lr
-            wait = 0
-            best_metric = float("inf")
+        loop_start = 0
+        lr = cfg.lr
+        wait = 0
+        best_metric = float("inf")
 
         history: List[Dict] = []
         consecutive_dead_loops = 0
@@ -580,7 +367,7 @@ class DMRGTrainer:
             1, (len(train_data) + cfg.batch_size - 1) // cfg.batch_size
         )
 
-        self._open_log(resuming=(resume_state is not None))
+        self._open_log()
         t_start = time.monotonic()
 
         try:
@@ -589,7 +376,6 @@ class DMRGTrainer:
                 max_bond_dim = self._bond_dim_for_loop(loop)
 
                 permutation = self._randperm_like(len(train_data), train_data.device)
-                stochastic_max_gradient_norm = 0.0
                 num_skipped_nan = 0
                 num_updates = 0
 
@@ -613,17 +399,12 @@ class DMRGTrainer:
                     right_environments = self._build_right_environments(batch)
                     stats_left_sweep = self._sweep(batch, "left", lr, left_environments, right_environments, max_bond_dim)
 
-                    stochastic_max_gradient_norm = max(stochastic_max_gradient_norm, stats_right_sweep["max_gradient_norm"], stats_left_sweep["max_gradient_norm"])
-
                     num_skipped_nan += (
                         stats_right_sweep["num_skipped_nan"] + stats_left_sweep["num_skipped_nan"]
                     )
                     num_updates += (
                         stats_right_sweep["num_updates"] + stats_left_sweep["num_updates"]
                     )
-
-                    if cfg.stochastic:
-                        break
                     
                 if num_skipped_nan > 0:
                     logger.warning(
@@ -642,7 +423,6 @@ class DMRGTrainer:
                     "lr": lr,
                     "bond_dims": list(self.mps.bond_dims),
                     "max_bond_dim_cap": max_bond_dim,
-                    "max_gradient_norm": stochastic_max_gradient_norm,
                     "num_skipped_nan": num_skipped_nan,
                     "num_updates": num_updates,
                     "elapsed_s": time.monotonic() - t_loop_start,
@@ -650,28 +430,9 @@ class DMRGTrainer:
                 }
                 if val_data is not None:
                     record["val_nll"] = self._control_nll(val_data)
-
-                subsampled = cfg.eval_max_samples > 0
-                is_last_loop = loop == cfg.num_loops - 1
-                if subsampled and cfg.full_eval_every > 0 and (
-                    is_last_loop or (loop + 1) % cfg.full_eval_every == 0
-                ):
-                    record["train_nll_full"] = self._full_nll(train_data)
-                    if val_data is not None:
-                        record["val_nll_full"] = self._full_nll(val_data)
-    
-                checkpoint_paths = self._maybe_checkpoint(loop, lr, wait, best_metric)
-                if checkpoint_paths is not None:
-                    record.update(checkpoint_paths)
     
                 history.append(record)
                 self._write_log(record)
-
-                logger.info(
-                    "loop %d/%d  train_nll=%.4f  lr=%.2e  max_gradient_norm=%.2e  bond_dims=%s",
-                    loop, cfg.num_loops - 1, train_nll, lr,
-                    stochastic_max_gradient_norm, self.mps.bond_dims,
-                )
 
                 if not math.isfinite(train_nll):
                     logger.error(

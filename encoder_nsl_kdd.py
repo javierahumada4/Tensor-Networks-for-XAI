@@ -75,7 +75,6 @@ class FeatureSpec:
     d: int                                   # physical dim of this site
     vocab: Optional[List] = None             # for categorical and discrete features
     edges: Optional[List[float]] = None      # for numeric quantile bins
-    log1p: bool = False                      # apply log1p before binning?
     normal_value: Optional[float] = None     # reference value for binary normal-vs-different encoding
 
     _vocab_map: Optional[Dict] = field(
@@ -108,7 +107,6 @@ class NSLKDDEncoder:
         target_d_numeric: int = 4,
         max_implicit_categorical: int = 8,
         quasi_constant_threshold: float = 0.95,
-        skew_threshold: float = 1.0,
     ) -> None:
         if target_d_numeric < 2:
             raise ValueError("target_d_numeric must be >= 2")
@@ -119,15 +117,10 @@ class NSLKDDEncoder:
                 "quasi_constant_threshold must be in (0.5, 1.0); "
                 f"got {quasi_constant_threshold}"
             )
-        if skew_threshold < 0:
-            raise ValueError(
-                f"skew_threshold must be >= 0; got {skew_threshold}"
-            )
 
         self.target_d_numeric = target_d_numeric
         self.max_implicit_categorical = max_implicit_categorical
         self.quasi_constant_threshold = quasi_constant_threshold
-        self.skew_threshold = skew_threshold
         self.specs: List[FeatureSpec] = []
 
     # ------------------------------------------------------------------
@@ -205,14 +198,7 @@ class NSLKDDEncoder:
             )
 
         # (5) Numeric feature
-        x_arr = x_normal.to_numpy().astype(float)
-        skew = self._fisher_skew(x_arr)
-        apply_log1p = (
-            abs(skew) > self.skew_threshold
-            and float(x_arr.min()) >= 0.0
-        )
-
-        x_for_qcut = np.log1p(x_arr) if apply_log1p else x_arr
+        x_for_qcut = x_normal.to_numpy().astype(float)
 
         d = self.target_d_numeric
         try:
@@ -228,27 +214,14 @@ class NSLKDDEncoder:
             return FeatureSpec(
                 name=col, kind="numeric", d=2,
                 edges=[-np.inf, median, np.inf],
-                log1p=apply_log1p,
             )
 
         effective_d = len(interior) + 1
         edges_full = [-np.inf] + interior + [np.inf]
         return FeatureSpec(
             name=col, kind="numeric", d=effective_d,
-            edges=edges_full, log1p=apply_log1p,
+            edges=edges_full,
         )
-
-    @staticmethod
-    def _fisher_skew(x: np.ndarray) -> float:
-        """Fisher's coefficient of skewness γ₁ = E[((X - μ)/σ)³]."""
-        n = x.size
-        if n < 2:
-            return 0.0
-        mu = float(np.mean(x))
-        sigma = float(np.std(x))
-        if sigma < 1e-12:
-            return 0.0
-        return float(np.mean(((x - mu) / sigma) ** 3))
 
     # ------------------------------------------------------------------
     # Transform
@@ -281,8 +254,6 @@ class NSLKDDEncoder:
 
         if spec.kind == "numeric":
             arr = x.astype(float).to_numpy()
-            if spec.log1p:
-                arr = np.log1p(arr)
             out = pd.cut(arr, bins=spec.edges, labels=False, include_lowest=True).astype(np.int64)
             if np.isnan(out).any():
                 raise EncodingError(
@@ -348,8 +319,6 @@ class NSLKDDEncoder:
                 ]
             if s.edges is not None:
                 entry["edges"] = [None if not np.isfinite(e) else float(e) for e in s.edges]
-            if s.log1p:
-                entry["log1p"] = True
             if s.normal_value is not None:
                 entry["normal_value"] = float(s.normal_value)
             out.append(entry)
@@ -427,15 +396,7 @@ def main(data_dir: Path) -> None:
     )
 
     kind_counts = Counter(s.kind for s in encoder.specs)
-    log1p_counts = Counter(
-        s.log1p for s in encoder.specs if s.kind == "numeric"
-    )
     logger.info("  by kind: %s", dict(kind_counts))
-    if kind_counts.get("numeric", 0):
-        logger.info(
-            "  numeric: log1p=True=%d, log1p=False=%d",
-            log1p_counts.get(True, 0), log1p_counts.get(False, 0),
-        )
 
     torch.save(train_X, data_dir / "train_X.pt")
     torch.save(test_X, data_dir / "test_X.pt")

@@ -7,7 +7,7 @@ import math
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -594,18 +594,18 @@ class DMRGTrainer:
                 else:
                     consecutive_dead_loops = 0
                 
-                if best_snapshot is not None and best_loop != loop:
-                    logger.info(
-                        "restoring best model: loop %d (%s=%.4f), "
-                        "discarding %d later loop(s).",
-                        best_loop, metric, best_metric, loop - best_loop,
-                    )
-                    self._restore_mps(best_snapshot)
-                elif best_snapshot is None:
-                    logger.warning(
-                        "no loop improved on the initial metric; "
-                        "keeping the last model."
-                    )
+            if best_snapshot is not None and best_loop != loop:
+                logger.info(
+                    "restoring best model: loop %d (%s=%.4f), "
+                    "discarding %d later loop(s).",
+                    best_loop, metric, best_metric, loop - best_loop,
+                )
+                self._restore_mps(best_snapshot)
+            elif best_snapshot is None:
+                logger.warning(
+                    "no loop improved on the initial metric; "
+                    "keeping the last model."
+                )
         finally:
             self._close_log()
 

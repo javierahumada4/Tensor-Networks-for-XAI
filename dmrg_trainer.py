@@ -21,7 +21,9 @@ class DMRGConfig:
 
     num_descent_steps: int = 1
     max_bond_dim: int = 100
-    max_bond_dim_schedule: Optional[Callable[[int], int]] = None
+    init_bond_cap: int = 4
+    bond_growth_factor: float = 2.0
+    discarded_weight_threshold: float = 1e-4
     svd_cutoff: float = 1e-8
     lr: float = 0.01
     num_loops: int = 20
@@ -30,6 +32,7 @@ class DMRGConfig:
     lr_min: float = 1e-6
     patience: int = 5
     improvement_threshold: float = 1e-4
+    early_stopping_patience: int = 0
     abort_after_dead_loops: int = 3
     batches_per_loop: int = 0
     metric_for_stopping: str = "train_nll"
@@ -50,6 +53,26 @@ class DMRGTrainer:
         if self.config.max_bond_dim < 1:
             raise ValueError(
                 f"max_bond_dim must be >= 1, got {self.config.max_bond_dim}"
+            )
+        if self.config.init_bond_cap < 1:
+            raise ValueError(
+                f"init_bond_cap must be >= 1, got {self.config.init_bond_cap}"
+            )
+        if self.config.bond_growth_factor <= 1.0:
+            raise ValueError(
+                "bond_growth_factor must be > 1.0 (set init_bond_cap == "
+                "max_bond_dim to disable growth); got "
+                f"{self.config.bond_growth_factor}"
+            )
+        if self.config.discarded_weight_threshold < 0.0:
+            raise ValueError(
+                "discarded_weight_threshold must be >= 0, got "
+                f"{self.config.discarded_weight_threshold}"
+            )
+        if self.config.early_stopping_patience < 0:
+            raise ValueError(
+                f"early_stopping_patience must be >= 0, got "
+                f"{self.config.early_stopping_patience}"
             )
         if self.config.abort_after_dead_loops < 0:
             raise ValueError(
@@ -227,8 +250,10 @@ class DMRGTrainer:
         )
 
         gradient_norms: List[torch.Tensor] = []
+        discarded_weights: List[torch.Tensor] = []
         num_skipped_nan = 0
         num_updates = 0
+        z_floor = self._z_floor(self.mps.dtype)
 
         for k in bond_indices:
             merged_tensor = self.mps.merge_sites(k)
@@ -251,9 +276,13 @@ class DMRGTrainer:
                 num_updates += 1
 
             if was_updated:
-                self.mps.split_and_truncate(
+                kept_singular_values = self.mps.split_and_truncate(
                     k, merged_tensor, direction, max_bond_dim, cfg.svd_cutoff
                 )
+                total_weight = merged_tensor.norm().pow(2)
+                kept_weight = kept_singular_values.square().sum()
+                discarded = (1.0 - kept_weight / total_weight.clamp_min(z_floor))
+                discarded_weights.append(discarded.clamp_min(0.0))
 
             if direction == "right" and k + 1 < num_sites - 1:
                 left_environments[k + 1] = self._update_left_environment(left_environments[k], k, configurations)
@@ -263,8 +292,12 @@ class DMRGTrainer:
         max_gradient_norm = (
             torch.stack(gradient_norms).max().item() if gradient_norms else 0.0
         )
+        max_discarded_weight = (
+            torch.stack(discarded_weights).max().item() if discarded_weights else 0.0
+        )
         return {
             "max_gradient_norm": max_gradient_norm,
+            "max_discarded_weight": max_discarded_weight,
             "num_skipped_nan": num_skipped_nan,
             "num_updates": num_updates,
         }
@@ -287,20 +320,40 @@ class DMRGTrainer:
         return indices.to(device)
     
     # ------------------------------------------------------------------
-    #  Bond-dim schedule
+    #  Best-model snapshot
+    # ------------------------------------------------------------------
+
+    def _snapshot_mps(self) -> List[torch.Tensor]:
+        """Detached CPU clone of every site tensor.
+        """
+        return [t.detach().cpu().clone() for t in self.mps.site_tensors]
+
+    def _restore_mps(self, snapshot: List[torch.Tensor]) -> None:
+        """Overwrite the live MPS with a snapshot taken by ``_snapshot_mps``.
+        """
+        for parameter, saved in zip(self.mps.site_tensors, snapshot):
+            parameter.data = saved.to(
+                device=parameter.device, dtype=parameter.dtype
+            ).clone()
+        self.mps.invalidate_environment_cache()
+
+    # ------------------------------------------------------------------
+    #  Dynamic bond-dim cap
     # ------------------------------------------------------------------
     
-    def _bond_dim_for_loop(self, loop: int) -> int:
-        schedule = self.config.max_bond_dim_schedule
-        if schedule is None:
-            return int(self.config.max_bond_dim)
-        value = int(schedule(loop))
-        if value < 1:
-            raise ValueError(
-                f"max_bond_dim_schedule returned {value} at loop={loop}; "
-                "must be >= 1"
-            )
-        return value
+    def _cap_is_binding(self, cap: int, discarded_weight: float) -> Optional[str]:
+        """Whether the truncation cap limited the model this loop.
+
+        Returns a short human-readable reason, or None if the cap is not
+        binding.  The cap is binding when either a bond actually reached
+        the cap (the SVD wanted more rank) or the truncation discarded a
+        non-negligible amount of weight.
+        """
+        if self.mps.bond_dims and max(self.mps.bond_dims) >= cap:
+            return "a bond reached the cap"
+        if discarded_weight > self.config.discarded_weight_threshold:
+            return f"discarded weight {discarded_weight:.2e} over threshold"
+        return None
     
     # ------------------------------------------------------------------
     #  Logging
@@ -351,9 +404,14 @@ class DMRGTrainer:
         self.mps.right_canonicalize()
 
         loop_start = 0
+        loop = loop_start - 1
         lr = cfg.lr
         wait = 0
         best_metric = float("inf")
+        best_loop = -1
+        best_snapshot: Optional[List[torch.Tensor]] = None
+        loops_since_best = 0
+        bond_cap = min(cfg.init_bond_cap, cfg.max_bond_dim)
 
         history: List[Dict] = []
         consecutive_dead_loops = 0
@@ -373,9 +431,11 @@ class DMRGTrainer:
         try:
             for loop in range(loop_start, cfg.num_loops):
                 t_loop_start = time.monotonic()
-                max_bond_dim = self._bond_dim_for_loop(loop)
+                max_bond_dim = bond_cap
 
                 permutation = self._randperm_like(len(train_data), train_data.device)
+                loop_max_gradient_norm = 0.0
+                loop_max_discarded_weight = 0.0
                 num_skipped_nan = 0
                 num_updates = 0
 
@@ -398,6 +458,9 @@ class DMRGTrainer:
                     left_environments = self._build_left_environments(batch)
                     right_environments = self._build_right_environments(batch)
                     stats_left_sweep = self._sweep(batch, "left", lr, left_environments, right_environments, max_bond_dim)
+
+                    loop_max_gradient_norm = max(loop_max_gradient_norm, stats_right_sweep["max_gradient_norm"], stats_left_sweep["max_gradient_norm"])
+                    loop_max_discarded_weight = max(loop_max_discarded_weight, stats_right_sweep["max_discarded_weight"], stats_left_sweep["max_discarded_weight"])
 
                     num_skipped_nan += (
                         stats_right_sweep["num_skipped_nan"] + stats_left_sweep["num_skipped_nan"]
@@ -423,6 +486,8 @@ class DMRGTrainer:
                     "lr": lr,
                     "bond_dims": list(self.mps.bond_dims),
                     "max_bond_dim_cap": max_bond_dim,
+                    "max_gradient_norm": loop_max_gradient_norm,
+                    "max_discarded_weight": loop_max_discarded_weight,
                     "num_skipped_nan": num_skipped_nan,
                     "num_updates": num_updates,
                     "elapsed_s": time.monotonic() - t_loop_start,
@@ -434,6 +499,31 @@ class DMRGTrainer:
                 history.append(record)
                 self._write_log(record)
 
+                monitored = record.get(metric, train_nll)
+                improved = monitored < best_metric - cfg.improvement_threshold
+                best_display = monitored if improved else best_metric
+                wait_display = 0 if improved else wait + 1
+
+                log_parts = [
+                    f"loop {loop}/{cfg.num_loops - 1}",
+                    f"train_nll={train_nll:.4f}",
+                ]
+                if "val_nll" in record:
+                    val_nll = record["val_nll"]
+                    log_parts.append(f"val_nll={val_nll:.4f}")
+                    log_parts.append(f"gap={val_nll - train_nll:+.4f}")
+                best_str = (
+                    f"{best_display:.4f}" if math.isfinite(best_display) else "--"
+                )
+                log_parts.append(f"best_{metric}={best_str}")
+                log_parts.append(f"wait={wait_display}/{cfg.patience}")
+                log_parts.append(f"lr={lr:.2e}")
+                log_parts.append(f"disc_w={loop_max_discarded_weight:.2e}")
+                log_parts.append(f"|grad|={loop_max_gradient_norm:.2e}")
+                log_parts.append(f"cap={bond_cap}/{cfg.max_bond_dim}")
+                log_parts.append(f"bond_dims={list(self.mps.bond_dims)}")
+                logger.info("  ".join(log_parts))
+
                 if not math.isfinite(train_nll):
                     logger.error(
                         "loop %d: train_nll is non-finite (%s). "
@@ -443,10 +533,29 @@ class DMRGTrainer:
                     break
     
                 monitor_value = record.get(metric, train_nll)
-                if monitor_value < best_metric - cfg.improvement_threshold:
-                    best_metric = monitor_value
+                if improved:
+                    best_metric = monitored
+                    best_loop = loop
+                    best_snapshot = self._snapshot_mps()
+                    loops_since_best = 0
                     wait = 0
+                    if bond_cap < cfg.max_bond_dim:
+                        reason = self._cap_is_binding(
+                            bond_cap, loop_max_discarded_weight
+                        )
+                        if reason is not None:
+                            new_cap = min(
+                                cfg.max_bond_dim,
+                                math.ceil(bond_cap * cfg.bond_growth_factor),
+                            )
+                            if new_cap > bond_cap:
+                                logger.info(
+                                    "loop %d: bond cap %d -> %d (%s).",
+                                    loop, bond_cap, new_cap, reason,
+                                )
+                                bond_cap = new_cap
                 else:
+                    loops_since_best += 1
                     wait += 1
                     if wait >= cfg.patience:
                         lr *= cfg.lr_shrink
@@ -457,6 +566,14 @@ class DMRGTrainer:
                                 "stopping early.", lr, cfg.lr_min,
                             )
                             break
+                    if (cfg.early_stopping_patience > 0
+                            and loops_since_best >= cfg.early_stopping_patience):
+                        logger.info(
+                            "early stopping: %s has not improved for %d loops "
+                            "(best=%.4f at loop %d).",
+                            metric, loops_since_best, best_metric, best_loop,
+                        )
+                        break
                 if num_updates == 0:
                     consecutive_dead_loops += 1
                     logger.error(
@@ -476,6 +593,19 @@ class DMRGTrainer:
                         break
                 else:
                     consecutive_dead_loops = 0
+                
+                if best_snapshot is not None and best_loop != loop:
+                    logger.info(
+                        "restoring best model: loop %d (%s=%.4f), "
+                        "discarding %d later loop(s).",
+                        best_loop, metric, best_metric, loop - best_loop,
+                    )
+                    self._restore_mps(best_snapshot)
+                elif best_snapshot is None:
+                    logger.warning(
+                        "no loop improved on the initial metric; "
+                        "keeping the last model."
+                    )
         finally:
             self._close_log()
 

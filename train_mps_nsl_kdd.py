@@ -47,20 +47,6 @@ INIT_BOND_DIM = 2
 VAL_FRACTION = 0.10
 SEED = 0
 
-def bond_schedule(loop: int) -> int:
-    if loop < 3:
-        return 4
-    if loop < 6:
-        return 8
-    if loop < 12:
-        return 16
-    if loop < 22:
-        return 32
-    if loop < 38:
-        return 64
-    return 128
-
-
 CONFIG = DMRGConfig(
     # training
     num_loops=60,
@@ -68,34 +54,29 @@ CONFIG = DMRGConfig(
 
     # mps capacity
     max_bond_dim=128,
-    max_bond_dim_schedule=bond_schedule,
+    init_bond_cap=4,
+    bond_growth_factor=2.0,
+    discarded_weight_threshold=1e-4,
     svd_cutoff=1e-8,
 
     # learning rate / early stopping
-    lr=1e-3,
+    lr=3e-4,
     lr_shrink=0.7,
     lr_min=1e-6,
     patience=8,
     improvement_threshold=1e-4,
 
-    adaptive_lr=False,
-    plateau_factor=10.0,
-    plateau_threshold=1e-4,
+    early_stopping_patience=12,
 
     # minibatches
-    batch_size=1024,
+    batch_size=512,
     batches_per_loop=0,
-    stochastic=False,
 
     # metric
     metric_for_stopping="val_nll",
-    eval_max_samples=0,
-    full_eval_every=0,
 
     # reproducibility / logging
     seed=123,
-    checkpoint_every=5,
-    checkpoint_dir="./checkpoints",
     log_path="./logs/mps.jsonl",
 
     abort_after_dead_loops=3,
@@ -196,6 +177,7 @@ def main(data_dir: Path) -> None:
         bond_dim=INIT_BOND_DIM,
         physical_dims=physical_dims,
         dtype=DTYPE,
+        init_std=None
     )
     logger.info(
         "MPS: %d sites, initial bond %d, max(d)=%d, initial parameters %d",
@@ -204,7 +186,6 @@ def main(data_dir: Path) -> None:
 
     # --- training ----------------------------------------------------
     config = CONFIG
-    config.checkpoint_dir = str(data_dir / "checkpoints")
     config.log_path = str(data_dir / "train_log.jsonl")
 
     logger.info("starting DMRG: %d loops, max_bond_dim=%d, lr=%.2e",

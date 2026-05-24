@@ -335,7 +335,6 @@ class DMRGTrainer:
             parameter.data = saved.to(
                 device=parameter.device, dtype=parameter.dtype
             ).clone()
-        self.mps.invalidate_environment_cache()
 
     # ------------------------------------------------------------------
     #  Dynamic bond-dim cap
@@ -404,7 +403,7 @@ class DMRGTrainer:
         self.mps.right_canonicalize()
 
         loop_start = 0
-        loop = loop_start - 1
+        last_loop = loop_start - 1
         lr = cfg.lr
         wait = 0
         best_metric = float("inf")
@@ -430,6 +429,7 @@ class DMRGTrainer:
 
         try:
             for loop in range(loop_start, cfg.num_loops):
+                last_loop = loop
                 t_loop_start = time.monotonic()
                 max_bond_dim = bond_cap
 
@@ -594,11 +594,11 @@ class DMRGTrainer:
                 else:
                     consecutive_dead_loops = 0
                 
-            if best_snapshot is not None and best_loop != loop:
+            if best_snapshot is not None and best_loop != last_loop:
                 logger.info(
                     "restoring best model: loop %d (%s=%.4f), "
                     "discarding %d later loop(s).",
-                    best_loop, metric, best_metric, loop - best_loop,
+                    best_loop, metric, best_metric, last_loop - best_loop,
                 )
                 self._restore_mps(best_snapshot)
             elif best_snapshot is None:

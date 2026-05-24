@@ -296,14 +296,18 @@ class NSLKDDEncoder:
 
         if spec.kind == "discrete":
             real_values = [v for v in spec.vocab if v is not None]
+            other_idx = mapping[None]
             sample = real_values[0]
             if isinstance(sample, int):
                 values = x.astype(float).round().astype(int)
+                codes = values.map(mapping)
+                return codes.fillna(other_idx).astype(np.int64).to_numpy()
             else:
-                values = x.astype(float)
-            other_idx = mapping[None]
-            codes = values.map(mapping)
-            return codes.fillna(other_idx).astype(np.int64).to_numpy()
+                arr = x.astype(float).to_numpy()
+                vocab_arr = np.asarray(real_values, dtype=float)
+                nearest = np.abs(arr[:, None] - vocab_arr[None, :]).argmin(axis=1)
+                within_tol = np.isclose(arr, vocab_arr[nearest])
+                return np.where(within_tol, nearest, other_idx).astype(np.int64)
 
         if spec.kind == "categorical":
             unknown_idx = mapping.get("UNKNOWN")
@@ -357,7 +361,10 @@ class NSLKDDEncoder:
 # ----------------------------------------------------------------------
 
 def load_split(path: Path) -> pd.DataFrame:
-    df = pd.read_csv(path, names=COLUMNS, header=None)
+    df = pd.read_csv(path, header=None)
+    if df.shape[1] != len(COLUMNS):
+        raise ValueError(f"{path.name}: esperadas {len(COLUMNS)} columnas, halladas {df.shape[1]}")
+    df.columns = COLUMNS
     df["label"] = df["label"].str.rstrip(".")
     df["family"] = df["label"].map(ATTACK_FAMILY)
     if df["family"].isna().any():

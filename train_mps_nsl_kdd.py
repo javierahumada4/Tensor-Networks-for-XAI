@@ -30,11 +30,7 @@ import torch
 from mps import MPS
 from dmrg_trainer import DMRGConfig, dmrg_train
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s  %(levelname)s  %(message)s",
-    datefmt="%H:%M:%S",
-)
+
 logger = logging.getLogger("train_mps")
 
 
@@ -216,6 +212,11 @@ def main(data_dir: Path) -> None:
     logger.info("saved: %s", history_path)
 
 if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s  %(levelname)s  %(message)s",
+        datefmt="%H:%M:%S",
+    )
     data_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("./nsl_kdd")
     main(data_dir)
 

@@ -5,6 +5,7 @@ NSL-KDD encoder
 from __future__ import annotations
 
 import json
+import logging
 import sys
 from collections import Counter
 from dataclasses import dataclass, field
@@ -15,6 +16,8 @@ import numpy as np
 import pandas as pd
 import torch
 
+
+logger = logging.getLogger(__name__)
 
 # ----------------------------------------------------------------------
 # Schema
@@ -396,7 +399,7 @@ def build_meta(df: pd.DataFrame) -> Dict[str, torch.Tensor]:
 def main(data_dir: Path) -> None:
     train = load_split(data_dir / "KDDTrain+.txt")
     test = load_split(data_dir / "KDDTest+.txt")
-    print(f"Loaded train {len(train):,}  test {len(test):,}")
+    logger.info("loaded: %d train rows, %d test rows", len(train), len(test))
 
     encoder = NSLKDDEncoder(
         target_d_numeric=4,
@@ -418,20 +421,20 @@ def main(data_dir: Path) -> None:
                     f"has range [{lo}, {hi}] outside [0, {d})"
                 )
             
-    print(
-        f"Schema: {len(encoder.specs)} sites, "
-        f"sum(d)={sum(physical_dims)}, max(d)={max(physical_dims)}"
+    logger.info(
+        "schema: %d sites, sum(d)=%d, max(d)=%d",
+        len(encoder.specs), sum(physical_dims), max(physical_dims),
     )
 
     kind_counts = Counter(s.kind for s in encoder.specs)
     log1p_counts = Counter(
         s.log1p for s in encoder.specs if s.kind == "numeric"
     )
-    print(f"  by kind: {dict(kind_counts)}")
+    logger.info("  by kind: %s", dict(kind_counts))
     if kind_counts.get("numeric", 0):
-        print(
-            f"  numeric: log1p=True={log1p_counts.get(True, 0)}, "
-            f"log1p=False={log1p_counts.get(False, 0)}"
+        logger.info(
+            "  numeric: log1p=True=%d, log1p=False=%d",
+            log1p_counts.get(True, 0), log1p_counts.get(False, 0),
         )
 
     torch.save(train_X, data_dir / "train_X.pt")
@@ -442,7 +445,16 @@ def main(data_dir: Path) -> None:
     schema_json = data_dir / "encoding_schema.json"
     schema_json.write_text(json.dumps(encoder.schema_dict(), indent=2))
 
-    print(f"Wrote artefacts to {data_dir}/ (train_X.pt, test_X.pt, train_meta.pt, test_meta.pt, encoding_schema.json)")
+    logger.info(
+        "wrote artefacts to %s/ "
+        "(train_X.pt, test_X.pt, train_meta.pt, test_meta.pt, encoding_schema.json)",
+        data_dir,
+    )
 if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s  %(levelname)s  %(message)s",
+        datefmt="%H:%M:%S",
+    )
     data_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("./nsl_kdd")
     main(data_dir)

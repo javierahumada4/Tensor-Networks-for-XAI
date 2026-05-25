@@ -24,6 +24,7 @@ class DMRGConfig:
     init_bond_cap: int = 4
     bond_growth_factor: float = 2.0
     discarded_weight_threshold: float = 1e-4
+    grow_confirm_loops: int = 4
     svd_cutoff: float = 1e-8
     lr: float = 0.01
     num_loops: int = 20
@@ -78,6 +79,11 @@ class DMRGTrainer:
             raise ValueError(
                 f"abort_after_dead_loops must be >= 0, got "
                 f"{self.config.abort_after_dead_loops}"
+            )
+        if self.config.grow_confirm_loops < 1:
+            raise ValueError(
+                f"grow_confirm_loops must be >= 1, got "
+                f"{self.config.grow_confirm_loops}"
             )
         
         try:
@@ -411,6 +417,7 @@ class DMRGTrainer:
         best_snapshot: Optional[List[torch.Tensor]] = None
         loops_since_best = 0
         bond_cap = min(cfg.init_bond_cap, cfg.max_bond_dim)
+        binding_streak = 0
 
         history: List[Dict] = []
         consecutive_dead_loops = 0
@@ -539,21 +546,6 @@ class DMRGTrainer:
                     best_snapshot = self._snapshot_mps()
                     loops_since_best = 0
                     wait = 0
-                    if bond_cap < cfg.max_bond_dim:
-                        reason = self._cap_is_binding(
-                            bond_cap, loop_max_discarded_weight
-                        )
-                        if reason is not None:
-                            new_cap = min(
-                                cfg.max_bond_dim,
-                                math.ceil(bond_cap * cfg.bond_growth_factor),
-                            )
-                            if new_cap > bond_cap:
-                                logger.info(
-                                    "loop %d: bond cap %d -> %d (%s).",
-                                    loop, bond_cap, new_cap, reason,
-                                )
-                                bond_cap = new_cap
                 else:
                     loops_since_best += 1
                     wait += 1
@@ -574,6 +566,31 @@ class DMRGTrainer:
                             metric, loops_since_best, best_metric, best_loop,
                         )
                         break
+
+                if bond_cap < cfg.max_bond_dim:
+                    cap_reason = self._cap_is_binding(
+                        bond_cap, loop_max_discarded_weight
+                    )
+                    binding_streak = (
+                        binding_streak + 1 if cap_reason is not None else 0
+                    )
+                    if binding_streak >= cfg.grow_confirm_loops:
+                        new_cap = min(
+                            cfg.max_bond_dim,
+                            math.ceil(bond_cap * cfg.bond_growth_factor),
+                        )
+                        if new_cap > bond_cap:
+                            logger.info(
+                                "loop %d: bond cap %d -> %d (%s, "
+                                "binding %d loop(s)).",
+                                loop, bond_cap, new_cap, cap_reason,
+                                binding_streak,
+                            )
+                            bond_cap = new_cap
+                            binding_streak = 0
+                else:
+                    binding_streak = 0
+
                 if num_updates == 0:
                     consecutive_dead_loops += 1
                     logger.error(

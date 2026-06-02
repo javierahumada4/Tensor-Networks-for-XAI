@@ -40,29 +40,29 @@ logger = logging.getLogger("train_mps")
 
 DTYPE = torch.float64
 INIT_BOND_DIM = 2
-VAL_FRACTION = 0.10
+VAL_FRACTION = 0.15
 
 CONFIG = DMRGConfig(
     # training
-    num_loops=100,
+    num_loops=150,
     num_descent_steps=2,
 
     # mps capacity
-    max_bond_dim=64,
+    max_bond_dim=128,
     init_bond_cap=8,
-    bond_growth_factor=1.25,
+    bond_growth_factor=1.5,
     discarded_weight_threshold=1e-3,
     grow_confirm_loops=5,
     svd_cutoff=1e-8,
 
     # learning rate / early stopping
-    lr=3e-4,
+    lr=8e-4,
     lr_shrink=0.5,
     lr_min=5e-5,
     patience=5,
     improvement_threshold=1e-3,
 
-    early_stopping_patience=10,
+    early_stopping_patience=15,
 
     # minibatches
     batch_size=1024,

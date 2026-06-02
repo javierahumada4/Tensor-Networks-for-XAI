@@ -104,7 +104,7 @@ class NSLKDDEncoder:
 
     def __init__(
         self,
-        target_d_numeric: int = 4,
+        target_d_numeric: int = 3,
         max_implicit_categorical: int = 8,
         quasi_constant_threshold: float = 0.95,
     ) -> None:

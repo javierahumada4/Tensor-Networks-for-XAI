@@ -51,7 +51,7 @@ def value_labels(schema: dict, site: int) -> List[str]:
             hi = edges[k + 1]
             lo_s = "-inf" if lo is None else f"{lo:.3g}"
             hi_s = "+inf" if hi is None else f"{hi:.3g}"
-            labels.append(f"[{lo_s},{hi_s})")
+            labels.append(f"[{lo_s};{hi_s})")
         return labels
     if "normal_value" in feat:
         normal_value = feat["normal_value"]
@@ -115,6 +115,47 @@ def probability_extraction(
                 f"{emp_probs[site][v]:.8f},{mps_probs[site][v]:.8f},"
                 f"{disparity[site]:.8f}"
             )
+    out_csv.write_text("\n".join(lines) + "\n")
+
+# ----------------------------------------------------------------------
+# Per-family probability extraction (how each family deviates from normal)
+# ----------------------------------------------------------------------
+def family_probability_extraction(
+    explainer: MPSExplainer,
+    x: torch.Tensor,
+    family_code: torch.Tensor,
+    family_names: List[str],
+    schema: dict,
+    out_csv: Path,
+) -> None:
+    """Empirical per-family marginal vs the model's (normal) marginal.
+
+    The MPS marginal is the model of normal traffic and is the same for
+    every family; comparing each family's empirical frequency against it
+    shows, feature by feature, where that family departs from normal.
+    """
+    names = feature_names(schema)
+    physical_dims = schema["physical_dims"]
+    mps_probs = [p.cpu().numpy() for p in explainer.all_feature_probabilities()]
+    fc = family_code.numpy()
+
+    header = ("family,site,feature,value_index,value_label,"
+              "family_freq_prob,mps_prob,disparity")
+    lines = [header]
+    for code, fname in enumerate(family_names):
+        mask = fc == code
+        if not mask.any():
+            continue
+        emp = empirical_marginals(x[torch.from_numpy(mask)], physical_dims)
+        for site, name in enumerate(names):
+            disparity = float(np.abs(mps_probs[site] - emp[site]).sum())
+            labels = value_labels(schema, site)
+            for v in range(physical_dims[site]):
+                lab = labels[v] if v < len(labels) else str(v)
+                lines.append(
+                    f"{fname},{site},{name},{v},{lab},"
+                    f"{emp[site][v]:.8f},{mps_probs[site][v]:.8f},{disparity:.8f}"
+                )
     out_csv.write_text("\n".join(lines) + "\n")
 
 # ----------------------------------------------------------------------
@@ -195,6 +236,49 @@ def feature_importance(
     out_csv.write_text("\n".join(lines) + "\n")
 
 # ----------------------------------------------------------------------
+# Per-family feature importance (discriminative gap vs normal)
+# ----------------------------------------------------------------------
+def family_feature_importance(
+    explainer: MPSExplainer,
+    x: torch.Tensor,
+    family_code: torch.Tensor,
+    family_names: List[str],
+    schema: dict,
+    out_csv: Path,
+) -> None:
+    """Discriminative gap of each feature, normal vs EACH attack family.
+
+    The binary benign-vs-all-attacks gap averages over every family and
+    washes out family-specific signals.  Here the gap is computed against
+    each family separately:  gap_f = mean P_i(observed | normal)
+                                     - mean P_i(observed | family f).
+    A large positive gap_f flags a feature decisive for that family.
+    """
+    names = feature_names(schema)
+    marginals = [p.cpu().numpy() for p in explainer.all_feature_probabilities()]
+    x_np = x.numpy()
+    fc = family_code.numpy()
+
+    normal_idx = family_names.index("normal")
+    normal_mask = fc == normal_idx
+    attack_families = [(c, f) for c, f in enumerate(family_names) if f != "normal"]
+
+    header = (["site", "feature", "mean_prob_normal"]
+              + [f"{tag}_{f}" for _, f in attack_families
+                 for tag in ("mean_prob", "gap")])
+    lines = [",".join(header)]
+    for site, name in enumerate(names):
+        per_row = marginals[site][x_np[:, site]]
+        mean_normal = float(per_row[normal_mask].mean()) if normal_mask.any() else float("nan")
+        cells = [str(site), name, f"{mean_normal:.6f}"]
+        for code, _ in attack_families:
+            m = fc == code
+            mean_f = float(per_row[m].mean()) if m.any() else float("nan")
+            cells += [f"{mean_f:.6f}", f"{mean_normal - mean_f:.6f}"]
+        lines.append(",".join(cells))
+    out_csv.write_text("\n".join(lines) + "\n")
+
+# ----------------------------------------------------------------------
 # Anomaly identification (per-feature NLL breakdown)
 # ----------------------------------------------------------------------
 def anomaly_breakdown(
@@ -244,6 +328,58 @@ def anomaly_breakdown(
             "true_nll": true_nll,
             "top_features": [names[t] for t in top_feats],
         })
+    out_csv.write_text("\n".join(lines) + "\n")
+
+# ----------------------------------------------------------------------
+# Per-family attribution (attack signatures)
+# ----------------------------------------------------------------------
+def family_attribution(
+    mps: MPS,
+    explainer: MPSExplainer,
+    x: torch.Tensor,
+    family_code: torch.Tensor,
+    family_names: List[str],
+    schema: dict,
+    out_csv: Path,
+) -> None:
+    """Mean per-feature NLL attribution within each attack family.
+
+    The per-feature attribution is the same single-site quantity used in
+    anomaly_breakdown (-log P_i(observed value)); here it is averaged over
+    ALL rows of each family instead of the top-k anomalies, yielding the
+    'signature' of each family as seen by the model: which features drive
+    the surprise for dos vs probe vs r2l vs u2r.  We also report the true
+    full-MPS NLL and the correlation residual per family.
+    """
+    names = feature_names(schema)
+    marginals = [p.cpu().numpy() for p in explainer.all_feature_probabilities()]
+    eps = 1e-30
+
+    x_np = x.numpy()
+    n, num = x_np.shape
+    attrib = np.zeros((n, num))
+    for site in range(num):
+        p = marginals[site][x_np[:, site]]
+        attrib[:, site] = -np.log(np.clip(p, eps, None))
+    attribution_sum = attrib.sum(axis=1)
+    true_nll = mps.anomaly_score(x, batch_size=4096).cpu().numpy()
+    residual = true_nll - attribution_sum
+
+    fc = family_code.numpy()
+    header = (["family", "n", "mean_true_nll", "mean_attribution_sum",
+               "mean_correlation_residual"] + [f"nll[{nm}]" for nm in names])
+    lines = [",".join(header)]
+    for code, fname in enumerate(family_names):
+        mask = fc == code
+        if not mask.any():
+            continue
+        per_feat = attrib[mask].mean(axis=0)
+        rec = ([fname, int(mask.sum()),
+                f"{true_nll[mask].mean():.4f}",
+                f"{attribution_sum[mask].mean():.4f}",
+                f"{residual[mask].mean():.4f}"]
+               + [f"{v:.4f}" for v in per_feat])
+        lines.append(",".join(str(c) for c in rec))
     out_csv.write_text("\n".join(lines) + "\n")
 
 # ----------------------------------------------------------------------
@@ -301,17 +437,16 @@ def conditional_probabilities(
     """
     names = feature_names(schema)
     physical_dims = schema["physical_dims"]
- 
+
     if site_i is None or site_j is None:
         mi = explainer.mutual_information_matrix().cpu().numpy()
         np.fill_diagonal(mi, -np.inf)
         flat = int(np.argmax(mi))
         site_i, site_j = divmod(flat, mi.shape[0])
- 
+
     unconditional = explainer.feature_probabilities(site_i).cpu().numpy()
-    rdm_cond = explainer.conditional_rdm(site_i, site_j, value_j)
-    conditioned = rdm_cond.diagonal().real.cpu().numpy()
- 
+    conditioned = explainer.conditional_probabilities(site_i, site_j, value_j).cpu().numpy()
+
     labels = value_labels(schema, site_i)
     header = "value_index,value_label,not_conditioned,conditioned"
     lines = [header]
@@ -319,6 +454,64 @@ def conditional_probabilities(
         lab = labels[k] if k < len(labels) else str(k)
         lines.append(f"{k},{lab},{unconditional[k]:.6f},{conditioned[k]:.6f}")
     out_csv.write_text("\n".join(lines) + "\n")
+
+# ----------------------------------------------------------------------
+# Joint probabilities (two-feature co-occurrence)
+# ----------------------------------------------------------------------
+def joint_probabilities(
+    explainer: MPSExplainer,
+    schema: dict,
+    out_csv: Path,
+    site_i: Optional[int] = None,
+    site_j: Optional[int] = None,
+) -> None:
+    """Joint distribution P(v_i, v_j) for a feature pair, compared against
+    the product of marginals P(v_i)·P(v_j).
+
+    If site_i / site_j are not given, pick the most strongly correlated
+    pair from the MI matrix.  The 'lift' = P(v_i, v_j) / (P(v_i)·P(v_j))
+    flags value combinations that co-occur far more (lift > 1) or far less
+    (lift < 1) than independence would predict -- i.e. the joint value
+    patterns the model actually learned, which MI summarises into a single
+    scalar and the conditional fixes to one value.
+    """
+    names = feature_names(schema)
+    physical_dims = schema["physical_dims"]
+    eps = 1e-30
+
+    if site_i is None or site_j is None:
+        mi = explainer.mutual_information_matrix().cpu().numpy()
+        np.fill_diagonal(mi, -np.inf)
+        flat = int(np.argmax(mi))
+        site_i, site_j = divmod(flat, mi.shape[0])
+
+    joint = explainer.joint_probabilities(site_i, site_j).cpu().numpy()
+    p_i = explainer.feature_probabilities(site_i).cpu().numpy()
+    p_j = explainer.feature_probabilities(site_j).cpu().numpy()
+    independent = np.outer(p_i, p_j)
+
+    labels_i = value_labels(schema, site_i)
+    labels_j = value_labels(schema, site_j)
+
+    header = ("feature_i,value_i_index,value_i_label,"
+              "feature_j,value_j_index,value_j_label,"
+              "joint,independent,lift")
+    lines = [header]
+    for vi in range(physical_dims[site_i]):
+        lab_i = labels_i[vi] if vi < len(labels_i) else str(vi)
+        for vj in range(physical_dims[site_j]):
+            lab_j = labels_j[vj] if vj < len(labels_j) else str(vj)
+            j = joint[vi, vj]
+            ind = independent[vi, vj]
+            lift = j / (ind + eps)
+            lines.append(
+                f"{names[site_i]},{vi},{lab_i},"
+                f"{names[site_j]},{vj},{lab_j},"
+                f"{j:.8f},{ind:.8f},{lift:.6f}"
+            )
+    out_csv.write_text("\n".join(lines) + "\n")
+
+
 
 # ----------------------------------------------------------------------
 # Main
@@ -338,16 +531,24 @@ def main(data_dir: Path) -> None:
     train_x, _ = load_split(data_dir, "train")
     test_x, test_meta = load_split(data_dir, "test")
     is_attack = test_meta["is_attack"]
+    is_attack = test_meta["is_attack"]
+    family_code = test_meta["family_code"]
+    family_names = test_meta["family_names"]
 
     explainer = MPSExplainer(mps)
     explainer.precompute_environments()
-
-    summary: Dict = {}
 
     # Direct probability extraction
     logger.info("Probability extraction -> probability_extraction.csv")
     probability_extraction(
         explainer, train_x, schema, out_dir / "probability_extraction.csv"
+    )
+
+    # Per-family probability extraction
+    logger.info("Family probability extraction -> family_probability_extraction.csv")
+    family_probability_extraction(
+        explainer, test_x, family_code, family_names, schema,
+        out_dir / "family_probability_extraction.csv",
     )
 
     # Von Neumann entropy
@@ -365,10 +566,24 @@ def main(data_dir: Path) -> None:
         out_dir / "feature_importance.csv",
     )
 
+    # Per-family feature importance (gap vs normal)
+    logger.info("Family feature importance -> family_feature_importance.csv")
+    family_feature_importance(
+        explainer, test_x, family_code, family_names, schema,
+        out_dir / "family_feature_importance.csv",
+    )
+
     # Anomaly identification (per-feature NLL breakdown)
     logger.info("Anomaly breakdown -> anomaly_breakdown.csv")
     anomaly_breakdown(
         mps, explainer, test_x, is_attack, schema, out_dir / "anomaly_breakdown.csv"
+    )
+
+    # Per-family attribution (attack signatures)
+    logger.info("Family attribution -> family_attribution.csv")
+    family_attribution(
+        mps, explainer, test_x, family_code, family_names, schema,
+        out_dir / "family_attribution.csv",
     )
 
     # Bond entropy
@@ -380,6 +595,12 @@ def main(data_dir: Path) -> None:
     conditional_probabilities(
         explainer, schema, out_dir / "conditional_probabilities.csv"
     )
+
+    # Joint probabilities (two-feature co-occurrence)
+    logger.info("Joint probabilities -> joint_probabilities.csv")
+    joint_probabilities(
+        explainer, schema, out_dir / "joint_probabilities.csv"
+    )  
 
 
 if __name__ == "__main__":

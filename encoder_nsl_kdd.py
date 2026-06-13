@@ -49,17 +49,22 @@ META_COLS = {"label", "difficulty"}                # metadata, not model inputs
 
 ATTACK_FAMILY: Dict[str, str] = {
     "normal": "normal",
+    # DoS (10)
     "back": "dos", "land": "dos", "neptune": "dos", "pod": "dos",
     "smurf": "dos", "teardrop": "dos", "apache2": "dos", "udpstorm": "dos",
-    "processtable": "dos", "worm": "dos", "mailbomb": "dos",
+    "processtable": "dos", "mailbomb": "dos",
+    # Probe (6)
     "satan": "probe", "ipsweep": "probe", "nmap": "probe", "portsweep": "probe",
     "mscan": "probe", "saint": "probe",
+    # R2L (15)
     "guess_passwd": "r2l", "ftp_write": "r2l", "imap": "r2l", "phf": "r2l",
     "multihop": "r2l", "warezmaster": "r2l", "warezclient": "r2l", "spy": "r2l",
     "xlock": "r2l", "xsnoop": "r2l", "snmpguess": "r2l", "snmpgetattack": "r2l",
-    "httptunnel": "r2l", "sendmail": "r2l", "named": "r2l",
+    "sendmail": "r2l", "named": "r2l", "worm": "r2l",
+    # U2R (8)
     "buffer_overflow": "u2r", "loadmodule": "u2r", "rootkit": "u2r",
     "perl": "u2r", "sqlattack": "u2r", "xterm": "u2r", "ps": "u2r",
+    "httptunnel": "u2r",
 }
 
 

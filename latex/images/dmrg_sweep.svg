@@ -1,0 +1,119 @@
+<svg viewBox="0 0 700 560" xmlns="http://www.w3.org/2000/svg" font-family="Latin Modern Roman, DejaVu Serif, serif">
+  <defs>
+    <marker id="arrow" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M0,0 L7,3 L0,6 Z" fill="#1f3f5f"/>
+    </marker>
+    <marker id="arrowboth" markerWidth="9" markerHeight="9" refX="2" refY="3" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M7,0 L0,3 L7,6 Z" fill="#1f3f5f"/>
+    </marker>
+    <marker id="arrowend" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M0,0 L7,3 L0,6 Z" fill="#1f3f5f"/>
+    </marker>
+  </defs>
+  <style>
+    .ten   { fill: #3a6ea5; stroke: #1f3f5f; stroke-width: 2; }
+    .ctr   { fill: #e0922f; stroke: #a8631a; stroke-width: 2; }
+    .merged{ fill: #e0922f; stroke: #a8631a; stroke-width: 2; }
+    .leg   { stroke: #1f3f5f; stroke-width: 2; fill: none; }
+    .bond  { stroke: #1f3f5f; stroke-width: 2; fill: none; }
+    .stub  { stroke: #9bb4c9; stroke-width: 2; fill: none; }
+    .sweep { stroke: #1f3f5f; stroke-width: 1.8; fill: none; }
+    .flow  { stroke: #1f3f5f; stroke-width: 1.8; fill: none; }
+    .lbl   { fill: #1f3f5f; font-size: 15px; }
+    .lbli  { fill: #1f3f5f; font-size: 16px; font-style: italic; }
+    .note  { fill: #777; font-size: 12.5px; font-style: italic; }
+    .step  { fill: #1f3f5f; font-size: 13.5px; }
+    .greek { font-family: "DejaVu Serif"; }
+    .sub   { font-size: 11px; }
+    .sup   { font-size: 11px; }
+    .panel { fill: #1f3f5f; font-size: 14px; font-weight: bold; }
+    .wlbl  { fill: #ffffff; font-size: 15px; font-style: italic; }
+  </style>
+
+  <!-- ============ PART (a): the sweep over the full chain ============ -->
+  <text class="panel" x="30" y="26">(a) Barrido en forma canónica</text>
+
+  <!-- sweep double arrow -->
+  <line class="sweep" x1="118" y1="52" x2="452" y2="52" marker-start="url(#arrowboth)" marker-end="url(#arrowend)"/>
+  <text class="note" x="285" y="46" text-anchor="middle">ida y vuelta, de extremo a extremo</text>
+
+  <!-- bond line -->
+  <line class="bond" x1="110" y1="92" x2="460" y2="92"/>
+
+  <!-- physical legs -->
+  <line class="leg" x1="110" y1="92" x2="110" y2="116"/>
+  <line class="leg" x1="180" y1="92" x2="180" y2="116"/>
+  <line class="leg" x1="250" y1="92" x2="250" y2="116"/>
+  <line class="leg" x1="320" y1="92" x2="320" y2="116"/>
+  <line class="leg" x1="390" y1="92" x2="390" y2="116"/>
+  <line class="leg" x1="460" y1="92" x2="460" y2="116"/>
+
+  <!-- left-canonical: right-pointing triangles -->
+  <polygon class="ten" points="98,80 98,104 124,92"/>
+  <polygon class="ten" points="168,80 168,104 194,92"/>
+  <!-- active pair: orange circles (orthogonality center) -->
+  <circle class="ctr" cx="250" cy="92" r="14"/>
+  <circle class="ctr" cx="320" cy="92" r="14"/>
+  <!-- right-canonical: left-pointing triangles -->
+  <polygon class="ten" points="402,80 402,104 376,92"/>
+  <polygon class="ten" points="472,80 472,104 446,92"/>
+
+  <!-- site labels for the active pair -->
+  <text class="lbli" x="250" y="74" text-anchor="middle">k</text>
+  <text class="lbli" x="320" y="74" text-anchor="middle">k+1</text>
+
+  <!-- group annotations -->
+  <text class="note" x="146" y="134" text-anchor="middle">isometrías (izq.)</text>
+  <text class="note" x="285" y="134" text-anchor="middle">par activo = centro</text>
+  <text class="note" x="424" y="134" text-anchor="middle">isometrías (der.)</text>
+
+  <!-- ============ PART (b): the local two-site update ============ -->
+  <text class="panel" x="30" y="184">(b) Actualización local de dos sitios</text>
+
+  <!-- stage b1: two active tensors -->
+  <line class="stub" x1="255" y1="216" x2="300" y2="216"/>
+  <line class="stub" x1="380" y1="216" x2="425" y2="216"/>
+  <line class="bond" x1="300" y1="216" x2="380" y2="216"/>
+  <line class="leg"  x1="300" y1="216" x2="300" y2="240"/>
+  <line class="leg"  x1="380" y1="216" x2="380" y2="240"/>
+  <circle class="ctr" cx="300" cy="216" r="14"/>
+  <polygon class="ten" points="393,204 393,228 367,216"/>
+  <text class="lbli" x="300" y="200" text-anchor="middle">A<tspan class="sup" dy="-8">(k)</tspan></text>
+  <text class="lbli" x="368" y="200" text-anchor="start">A<tspan class="sup" dy="-8">(k+1)</tspan></text>
+
+  <!-- arrow b1 -> b2 -->
+  <line class="flow" x1="340" y1="252" x2="340" y2="286" marker-end="url(#arrow)"/>
+  <text class="step" x="350" y="273" text-anchor="start">fusión</text>
+
+  <!-- stage b2: merged tensor -->
+  <line class="stub" x1="270" y1="312" x2="302" y2="312"/>
+  <line class="stub" x1="378" y1="312" x2="410" y2="312"/>
+  <line class="leg"  x1="326" y1="324" x2="326" y2="346"/>
+  <line class="leg"  x1="354" y1="324" x2="354" y2="346"/>
+  <ellipse class="merged" cx="340" cy="312" rx="38" ry="17"/>
+  <text class="wlbl greek" x="340" y="318" text-anchor="middle">Θ</text>
+  <text class="step" x="420" y="316" text-anchor="start">optimización por gradiente</text>
+
+  <!-- arrow b2 -> b3 -->
+  <line class="flow" x1="340" y1="358" x2="340" y2="392" marker-end="url(#arrow)"/>
+  <text class="step" x="350" y="379" text-anchor="start">descomposición SVD (división)</text>
+
+  <!-- stage b3: split, center shifted right -->
+  <line class="stub" x1="255" y1="422" x2="300" y2="422"/>
+  <line class="stub" x1="380" y1="422" x2="425" y2="422"/>
+  <line class="bond" x1="300" y1="422" x2="380" y2="422"/>
+  <line class="leg"  x1="300" y1="422" x2="300" y2="446"/>
+  <line class="leg"  x1="380" y1="422" x2="380" y2="446"/>
+  <polygon class="ten" points="288,410 288,434 314,422"/>
+  <circle class="ctr" cx="380" cy="422" r="14"/>
+  <text class="lbl greek" x="340" y="412" text-anchor="middle">D<tspan class="sub" dy="4">k</tspan></text>
+  <text class="note" x="455" y="426" text-anchor="start">el centro avanza →</text>
+  <text class="note" x="340" y="468" text-anchor="middle">la dimensión de enlace se ajusta de forma adaptativa al truncar la SVD</text>
+
+  <!-- ============ legend ============ -->
+  <line x1="60" y1="512" x2="640" y2="512" stroke="#dddddd" stroke-width="1"/>
+  <polygon class="ten" points="150,506 150,524 168,515"/>
+  <text class="note" x="178" y="519" text-anchor="start">tensor isométrico (canónico)</text>
+  <circle class="ctr" cx="420" cy="515" r="9"/>
+  <text class="note" x="436" y="519" text-anchor="start">centro de ortogonalidad</text>
+</svg>

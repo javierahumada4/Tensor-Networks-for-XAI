@@ -1,0 +1,75 @@
+<svg viewBox="0 0 640 300" xmlns="http://www.w3.org/2000/svg" font-family="Latin Modern Roman, DejaVu Serif, serif">
+  <defs>
+    <marker id="ar" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M0,0 L7,3 L0,6 Z" fill="#1f3f5f"/>
+    </marker>
+    <marker id="arg" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M0,0 L7,3 L0,6 Z" fill="#a8631a"/>
+    </marker>
+  </defs>
+  <style>
+    .ten   { fill: #3a6ea5; stroke: #1f3f5f; stroke-width: 1.8; }
+    .bond  { stroke: #1f3f5f; stroke-width: 1.8; fill: none; }
+    .phys  { stroke: #1f3f5f; stroke-width: 1.8; fill: none; }
+    .sweep { stroke: #1f3f5f; stroke-width: 1.6; fill: none; }
+    .env   { stroke: #a8631a; stroke-width: 1.6; fill: none; stroke-dasharray: 5 4; }
+    .envar { stroke: #a8631a; stroke-width: 1.6; fill: none; }
+    .zlbl  { fill: #1f3f5f; font-size: 26px; }
+    .rlbl  { fill: #1f3f5f; font-size: 19px; font-style: italic; }
+    .greek { font-family: "DejaVu Serif"; }
+    .note  { fill: #777; font-size: 12.5px; font-style: italic; }
+    .vlbl  { fill: #1f3f5f; font-size: 15px; font-style: italic; }
+    .elbl  { fill: #a8631a; font-size: 13px; font-style: italic; }
+    .sub   { font-size: 11px; }
+  </style>
+
+  <!-- Z = -->
+  <text class="zlbl" x="48" y="170" text-anchor="start">Z =</text>
+
+  <!-- sweep arrow on top -->
+  <line class="sweep" x1="128" y1="74" x2="436" y2="74" marker-end="url(#ar)"/>
+  <text class="note" x="282" y="64" text-anchor="middle">contracción de izquierda a derecha</text>
+
+  <!-- top bond (bra) -->
+  <line class="bond" x1="130" y1="115" x2="430" y2="115"/>
+  <!-- bottom bond (ket) -->
+  <line class="bond" x1="130" y1="205" x2="430" y2="205"/>
+
+  <!-- physical-index connectors (shared between ket and bra) -->
+  <line class="phys" x1="130" y1="128" x2="130" y2="192"/>
+  <line class="phys" x1="205" y1="128" x2="205" y2="192"/>
+  <line class="phys" x1="280" y1="128" x2="280" y2="192"/>
+  <line class="phys" x1="355" y1="128" x2="355" y2="192"/>
+  <line class="phys" x1="430" y1="128" x2="430" y2="192"/>
+
+  <!-- bra row (conjugate) -->
+  <circle class="ten" cx="130" cy="115" r="13"/>
+  <circle class="ten" cx="205" cy="115" r="13"/>
+  <circle class="ten" cx="280" cy="115" r="13"/>
+  <circle class="ten" cx="355" cy="115" r="13"/>
+  <circle class="ten" cx="430" cy="115" r="13"/>
+  <!-- ket row -->
+  <circle class="ten" cx="130" cy="205" r="13"/>
+  <circle class="ten" cx="205" cy="205" r="13"/>
+  <circle class="ten" cx="280" cy="205" r="13"/>
+  <circle class="ten" cx="355" cy="205" r="13"/>
+  <circle class="ten" cx="430" cy="205" r="13"/>
+
+  <!-- row labels -->
+  <text class="rlbl greek" x="108" y="121" text-anchor="end">Ψ*</text>
+  <text class="rlbl greek" x="108" y="211" text-anchor="end">Ψ</text>
+  <text class="note" x="470" y="111" text-anchor="start">copia conjugada</text>
+  <text class="note" x="470" y="209" text-anchor="start">MPS original</text>
+
+  <!-- physical index label on middle connector -->
+  <text class="vlbl" x="288" y="156" text-anchor="start">v<tspan class="sub" dy="4">k</tspan></text>
+  <text class="note" x="288" y="172" text-anchor="start">suma sobre los d valores</text>
+
+  <!-- partial environment box around first two sites -->
+  <rect class="env" x="112" y="96" width="111" height="128" rx="8"/>
+  <text class="elbl" x="167" y="245" text-anchor="middle">entorno parcial E</text>
+  <text class="note" x="167" y="261" text-anchor="middle">(matriz sobre índices de enlace)</text>
+
+  <!-- accumulation arrow -->
+  <line class="envar" x1="223" y1="160" x2="268" y2="160" marker-end="url(#arg)"/>
+</svg>

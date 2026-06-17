@@ -1,5 +1,5 @@
-value_index,value_label,not_conditioned,conditioned
-0,[-inf;1),0.312543,0.712992
-1,[1;4),0.209743,0.241907
-2,[4;14),0.247300,0.035637
-3,[14;+inf),0.230414,0.009464
+feature_i,value_index,value_i_label,feature_j,value_j_index,value_j_label,not_conditioned,conditioned
+count,0,[-inf;1),srv_count,0,[-inf;2),0.312543,0.712992
+count,1,[1;4),srv_count,0,[-inf;2),0.209743,0.241907
+count,2,[4;14),srv_count,0,[-inf;2),0.247300,0.035637
+count,3,[14;+inf),srv_count,0,[-inf;2),0.230414,0.009464

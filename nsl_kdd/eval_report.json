@@ -1,0 +1,214 @@
+{
+  "model": {
+    "num_sites": 40,
+    "num_parameters": 281800,
+    "bond_dims": [
+      2,
+      5,
+      62,
+      62,
+      62,
+      39,
+      20,
+      20,
+      40,
+      62,
+      62,
+      62,
+      62,
+      62,
+      62,
+      62,
+      62,
+      62,
+      62,
+      62,
+      62,
+      62,
+      62,
+      62,
+      62,
+      54,
+      27,
+      27,
+      54,
+      62,
+      62,
+      62,
+      62,
+      62,
+      32,
+      16,
+      8,
+      4,
+      2
+    ],
+    "sanity": {
+      "log_norm": -3.760880495917718e-15,
+      "tensors_finite": true,
+      "issues": []
+    }
+  },
+  "dataset": {
+    "n_test_total": 22544,
+    "n_test_scored": 22544,
+    "n_dropped_nan": 0,
+    "n_normal": 9711,
+    "n_attack": 12833,
+    "attack_rate": 0.5692423704755145,
+    "per_family_counts": {
+      "dos": 7458,
+      "normal": 9711,
+      "probe": 2421,
+      "r2l": 2754,
+      "u2r": 200
+    }
+  },
+  "thresholds": {
+    "p94.5": 13.698746587055584,
+    "p99": 19.52204624163145
+  },
+  "threshold_policy": "percentile of val-normal NLL; val-normal is the trainer's held-out split, reconstructed via its own split helpers",
+  "global_metrics": {
+    "auc_roc": 0.9532551278990007,
+    "auc_pr": 0.9500550026694458
+  },
+  "metrics_per_threshold": {
+    "p94.5": {
+      "threshold": 13.698746587055584,
+      "tp": 11551,
+      "fp": 804,
+      "fn": 1282,
+      "tn": 8907,
+      "precision": 0.9349251315256981,
+      "recall": 0.9001013013325021,
+      "f1": 0.9171827854533905,
+      "fpr": 0.08279270929873339
+    },
+    "p99": {
+      "threshold": 19.52204624163145,
+      "tp": 9929,
+      "fp": 432,
+      "fn": 2904,
+      "tn": 9279,
+      "precision": 0.9583051828974037,
+      "recall": 0.7737084080105977,
+      "f1": 0.8561696990601018,
+      "fpr": 0.04448563484708063
+    }
+  },
+  "per_family": {
+    "evaluated_at": [
+      "p94.5",
+      "p99"
+    ],
+    "families": {
+      "dos": {
+        "n_samples": 7458,
+        "auc_roc": 0.9776786250557441,
+        "auc_pr": 0.9466357595140054,
+        "auc_pr_baseline": 0.4343875589725668,
+        "recall_at_threshold": {
+          "p94.5": 0.9911504424778761,
+          "p99": 0.8551890587288817
+        }
+      },
+      "probe": {
+        "n_samples": 2421,
+        "auc_roc": 0.9681474071972871,
+        "auc_pr": 0.8513167120116907,
+        "auc_pr_baseline": 0.19955489614243324,
+        "recall_at_threshold": {
+          "p94.5": 0.9566294919454771,
+          "p99": 0.8616274266831888
+        }
+      },
+      "r2l": {
+        "n_samples": 2754,
+        "auc_roc": 0.8786967320710135,
+        "auc_pr": 0.6597800751093916,
+        "auc_pr_baseline": 0.22093862815884477,
+        "recall_at_threshold": {
+          "p94.5": 0.6347131445170661,
+          "p99": 0.5079883805374001
+        }
+      },
+      "u2r": {
+        "n_samples": 200,
+        "auc_roc": 0.8889009885696634,
+        "auc_pr": 0.10659331545131011,
+        "auc_pr_baseline": 0.020179598425991322,
+        "recall_at_threshold": {
+          "p94.5": 0.475,
+          "p99": 0.33
+        }
+      }
+    }
+  },
+  "per_difficulty": {
+    "evaluated_at": "p99",
+    "buckets": {
+      "difficulty_0_to_15": {
+        "n_samples": 3255,
+        "recall_at_threshold": 0.6125960061443932
+      },
+      "difficulty_15_to_19": {
+        "n_samples": 4699,
+        "recall_at_threshold": 0.7039795701213024
+      },
+      "difficulty_19_to_21": {
+        "n_samples": 4879,
+        "recall_at_threshold": 0.9483500717360115
+      }
+    }
+  },
+  "distribution_shift": {
+    "train_normal": {
+      "n": 57242,
+      "percentiles": {
+        "p50": 7.771889630029808,
+        "p90": 11.956541336350645,
+        "p95": 13.28695323717699,
+        "p99": 16.259925627126545
+      }
+    },
+    "val_normal": {
+      "n": 10101,
+      "percentiles": {
+        "p50": 7.848030865516534,
+        "p90": 12.316673526352247,
+        "p95": 13.959219676409873,
+        "p99": 19.52204624163145
+      }
+    },
+    "test_normal": {
+      "n": 9711,
+      "percentiles": {
+        "p50": 7.837733990635882,
+        "p90": 13.133464197851103,
+        "p95": 18.08312726385185,
+        "p99": 32.32596340628447
+      }
+    },
+    "realised_fpr_on_test_normal": {
+      "p94.5": 0.08279270929873339,
+      "p99": 0.04448563484708063
+    }
+  },
+  "plots": [
+    "evaluate_graphs/eval_nll_histograms.png",
+    "evaluate_graphs/eval_roc_pr.png",
+    "evaluate_graphs/eval_threshold_sweep.png",
+    "evaluate_graphs/eval_confusion.png"
+  ],
+  "tables": [
+    "evaluate_tables/global_metrics.csv",
+    "evaluate_tables/metrics_per_threshold.csv",
+    "evaluate_tables/per_family.csv",
+    "evaluate_tables/per_difficulty.csv",
+    "evaluate_tables/distribution_shift.csv",
+    "evaluate_tables/realised_fpr.csv",
+    "evaluate_tables/threshold_sweep.csv",
+    "evaluate_tables/test_scores.csv"
+  ]
+}

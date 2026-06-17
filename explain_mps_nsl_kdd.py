@@ -8,6 +8,7 @@ figure instead of aborting the whole run.
 
 from __future__ import annotations
 
+import csv
 import json
 import logging
 import sys
@@ -26,9 +27,42 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+# ----------------------------------------------------------------------
+# Figure style: readable typography after LaTeX scales figures to ~\textwidth
+# ----------------------------------------------------------------------
+# on-page font size ~= (size set here) x (display width / figure width).
+# Many plots below have one label per feature (~40), so they are wide; those
+# are meant to be included LANDSCAPE in the document (sidewaysfigure). The two
+# constants control the dense per-feature ticks and heatmap cell numbers.
+plt.rcParams.update({
+    "font.size":        12,
+    "axes.titlesize":   13,
+    "axes.labelsize":   13,
+    "xtick.labelsize":  12,
+    "ytick.labelsize":  12,
+    "legend.fontsize":  11,
+    "figure.titlesize": 14,
+})
+FS_DENSE = 9   # rotated per-feature tick labels when there are many features
+FS_CELL  = 8   # numbers printed inside heatmap / matrix cells
+
 logger = logging.getLogger("explain_mps")
 
-DPI = 140
+DPI = 200
+
+
+# ----------------------------------------------------------------------
+# CSV writing (single, escaping-safe path for every table)
+# ----------------------------------------------------------------------
+def _write_csv(path: Path, header: List[str], rows: List[List]) -> None:
+    """Write a CSV with proper quoting/escaping via the csv module."""
+    with path.open("w", newline="") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(header)
+        writer.writerows(rows)
+    logger.info("wrote %s", path.name)
+
+
 # ----------------------------------------------------------------------
 # Loading
 # ----------------------------------------------------------------------
@@ -61,7 +95,7 @@ def value_labels(schema: dict, site: int) -> List[str]:
         return labels
     if "normal_value" in feat:
         normal_value = feat["normal_value"]
-        return [f"{normal_value:g} (normal)", "different"]
+        return [f"{normal_value:g} (normal)", "distinto"]
     raise ValueError(
         f"site {site} ({feat.get('name', '?')}, kind={feat.get('kind', '?')}): "
         f"cannot build value labels; expected one of 'vocab', 'edges' or 'normal_value'"
@@ -110,59 +144,19 @@ def probability_extraction(
         [np.abs(mps_probs[k] - emp_probs[k]).sum() for k in range(len(names))]
     )
 
-    header = "site,feature,value_index,value_label,freq_prob,mps_prob,disparity"
-    lines = [header]
+    header = ["site", "feature", "value_index", "value_label",
+              "freq_prob", "mps_prob", "disparity"]
+    rows: List[List] = []
     for site, name in enumerate(names):
         labels = value_labels(schema, site)
         for v in range(physical_dims[site]):
             lab = labels[v]
-            lines.append(
-                f"{site},{name},{v},{lab},"
-                f"{emp_probs[site][v]:.8f},{mps_probs[site][v]:.8f},"
-                f"{disparity[site]:.8f}"
-            )
-    out_csv.write_text("\n".join(lines) + "\n")
-
-# ----------------------------------------------------------------------
-# Per-family probability extraction (how each family deviates from normal)
-# ----------------------------------------------------------------------
-def family_probability_extraction(
-    explainer: MPSExplainer,
-    x: torch.Tensor,
-    family_code: torch.Tensor,
-    family_names: List[str],
-    schema: dict,
-    out_csv: Path,
-) -> None:
-    """Empirical per-family marginal vs the model's (normal) marginal.
-
-    The MPS marginal is the model of normal traffic and is the same for
-    every family; comparing each family's empirical frequency against it
-    shows, feature by feature, where that family departs from normal.
-    """
-    names = feature_names(schema)
-    physical_dims = schema["physical_dims"]
-    mps_probs = [p.cpu().numpy() for p in explainer.all_feature_probabilities()]
-    fc = family_code.numpy()
-
-    header = ("family,site,feature,value_index,value_label,"
-              "family_freq_prob,mps_prob,disparity")
-    lines = [header]
-    for code, fname in enumerate(family_names):
-        mask = fc == code
-        if not mask.any():
-            continue
-        emp = empirical_marginals(x[torch.from_numpy(mask)], physical_dims)
-        for site, name in enumerate(names):
-            disparity = float(np.abs(mps_probs[site] - emp[site]).sum())
-            labels = value_labels(schema, site)
-            for v in range(physical_dims[site]):
-                lab = labels[v] if v < len(labels) else str(v)
-                lines.append(
-                    f"{fname},{site},{name},{v},{lab},"
-                    f"{emp[site][v]:.8f},{mps_probs[site][v]:.8f},{disparity:.8f}"
-                )
-    out_csv.write_text("\n".join(lines) + "\n")
+            rows.append([
+                site, name, v, lab,
+                f"{emp_probs[site][v]:.8f}", f"{mps_probs[site][v]:.8f}",
+                f"{disparity[site]:.8f}",
+            ])
+    _write_csv(out_csv, header, rows)
 
 # ----------------------------------------------------------------------
 # Von Neumann entropy
@@ -174,10 +168,10 @@ def vn_entropy(
     names = feature_names(schema)
     entropies = explainer.site_entropies().cpu().numpy()
 
-    lines = ["site,feature,entropy"]
-    for site, name in enumerate(names):
-        lines.append(f"{site},{name},{entropies[site]:.8f}")
-    out_csv.write_text("\n".join(lines) + "\n")
+    header = ["site", "feature", "entropy"]
+    rows = [[site, name, f"{entropies[site]:.8f}"]
+            for site, name in enumerate(names)]
+    _write_csv(out_csv, header, rows)
 
 
 # ----------------------------------------------------------------------
@@ -190,12 +184,11 @@ def mutual_information(
     names = feature_names(schema)
     mi = explainer.mutual_information_matrix().cpu().numpy()
 
-    header = "feature," + ",".join(names)
-    lines = [header]
+    header = ["feature"] + list(names)
+    rows: List[List] = []
     for i, name in enumerate(names):
-        row = ",".join(f"{mi[i, j]:.8f}" for j in range(len(names)))
-        lines.append(f"{name},{row}")
-    out_csv.write_text("\n".join(lines) + "\n")
+        rows.append([name] + [f"{mi[i, j]:.8f}" for j in range(len(names))])
+    _write_csv(out_csv, header, rows)
 
 # ----------------------------------------------------------------------
 # Feature importance
@@ -218,28 +211,28 @@ def feature_importance(
     attack_mask = ~benign_mask
     x_np = x.numpy()
  
-    rows: List[Dict] = []
+    dict_rows: List[Dict] = []
     for site, name in enumerate(names):
         p_site = marginals[site]
         per_row_prob = p_site[x_np[:, site]]
         mean_benign = float(per_row_prob[benign_mask].mean()) if benign_mask.any() else float("nan")
         mean_attack = float(per_row_prob[attack_mask].mean()) if attack_mask.any() else float("nan")
-        rows.append({
+        dict_rows.append({
             "site": site,
             "feature": name,
             "mean_prob_benign": mean_benign,
             "mean_prob_attack": mean_attack,
             "discriminative_gap": mean_benign - mean_attack,
         })
- 
-    header = "site,feature,mean_prob_benign,mean_prob_attack,discriminative_gap"
-    lines = [header]
-    for r in rows:
-        lines.append(
-            f"{r['site']},{r['feature']},{r['mean_prob_benign']:.6f},"
-            f"{r['mean_prob_attack']:.6f},{r['discriminative_gap']:.6f}"
-        )
-    out_csv.write_text("\n".join(lines) + "\n")
+
+    header = ["site", "feature", "mean_prob_benign",
+              "mean_prob_attack", "discriminative_gap"]
+    rows = [
+        [r["site"], r["feature"], f"{r['mean_prob_benign']:.6f}",
+         f"{r['mean_prob_attack']:.6f}", f"{r['discriminative_gap']:.6f}"]
+        for r in dict_rows
+    ]
+    _write_csv(out_csv, header, rows)
 
 # ----------------------------------------------------------------------
 # Per-family feature importance (discriminative gap vs normal)
@@ -272,17 +265,17 @@ def family_feature_importance(
     header = (["site", "feature", "mean_prob_normal"]
               + [f"{tag}_{f}" for _, f in attack_families
                  for tag in ("mean_prob", "gap")])
-    lines = [",".join(header)]
+    rows: List[List] = []
     for site, name in enumerate(names):
         per_row = marginals[site][x_np[:, site]]
         mean_normal = float(per_row[normal_mask].mean()) if normal_mask.any() else float("nan")
-        cells = [str(site), name, f"{mean_normal:.6f}"]
+        cells: List = [site, name, f"{mean_normal:.6f}"]
         for code, _ in attack_families:
             m = fc == code
             mean_f = float(per_row[m].mean()) if m.any() else float("nan")
             cells += [f"{mean_f:.6f}", f"{mean_normal - mean_f:.6f}"]
-        lines.append(",".join(cells))
-    out_csv.write_text("\n".join(lines) + "\n")
+        rows.append(cells)
+    _write_csv(out_csv, header, rows)
 
 # ----------------------------------------------------------------------
 # Anomaly identification (per-feature NLL breakdown)
@@ -292,101 +285,77 @@ def anomaly_breakdown(
     explainer: MPSExplainer,
     x: torch.Tensor,
     is_attack: torch.Tensor,
-    schema: dict,
-    out_csv: Path,
-    top_k: int = 10,
-) -> None:
-    """
-    For the highest-scoring anomalies, decompose the alert per feature.
-    """
-    names = feature_names(schema)
-    marginals = [p.cpu().numpy() for p in explainer.all_feature_probabilities()]
-    eps = 1e-30
- 
-    true_scores = mps.anomaly_score(x, batch_size=4096).cpu().numpy()
-    x_np = x.numpy()
- 
-    order = np.argsort(-true_scores)[:top_k]
- 
-    header = (["rank", "row", "is_attack", "true_nll",
-               "attribution_sum", "correlation_residual"]
-              + [f"nll[{n}]" for n in names])
-    lines = [",".join(header)]
-    detail = []
-    for rank, row in enumerate(order):
-        per_feat = []
-        for site in range(len(names)):
-            p = marginals[site][x_np[row, site]]
-            per_feat.append(-np.log(max(p, eps)))
-        attribution_sum = float(np.sum(per_feat))
-        true_nll = float(true_scores[row])
-        residual = true_nll - attribution_sum
-        record = ([rank, int(row), int(is_attack[row].item()),
-                   f"{true_nll:.4f}", f"{attribution_sum:.4f}",
-                   f"{residual:.4f}"]
-                  + [f"{v:.4f}" for v in per_feat])
-        lines.append(",".join(str(c) for c in record))
-
-        top_feats = np.argsort(-np.array(per_feat))[:3]
-        detail.append({
-            "row": int(row),
-            "is_attack": int(is_attack[row].item()),
-            "true_nll": true_nll,
-            "top_features": [names[t] for t in top_feats],
-        })
-    out_csv.write_text("\n".join(lines) + "\n")
-
-# ----------------------------------------------------------------------
-# Per-family attribution (attack signatures)
-# ----------------------------------------------------------------------
-def family_attribution(
-    mps: MPS,
-    explainer: MPSExplainer,
-    x: torch.Tensor,
     family_code: torch.Tensor,
     family_names: List[str],
     schema: dict,
     out_csv: Path,
+    n_each: int = 3,
+    nll_percentile: float = 90.0,
 ) -> None:
-    """Mean per-feature NLL attribution within each attack family.
+    """Decompose, per feature, the NLL of the anomalies with the lowest and
+    highest correlation share.
 
-    The per-feature attribution is the same single-site quantity used in
-    anomaly_breakdown (-log P_i(observed value)); here it is averaged over
-    ALL rows of each family instead of the top-k anomalies, yielding the
-    'signature' of each family as seen by the model: which features drive
-    the surprise for dos vs probe vs r2l vs u2r.  We also report the true
-    full-MPS NLL and the correlation residual per family.
+    The selection is meant to showcase the correlation-share reliability
+    metric: among clearly anomalous connections (NLL above ``nll_percentile``),
+    it picks the ``n_each`` with the smallest share (value anomalies, whose
+    per-feature breakdown is faithful) and the ``n_each`` with the largest
+    share (correlation anomalies, whose breakdown is misleading because the
+    surprise lives in the combination of values rather than in any single one).
+    Restricting to high-NLL connections is essential: for low-NLL ones the
+    share |residual| / NLL is dominated by a tiny denominator and meaningless.
     """
     names = feature_names(schema)
     marginals = [p.cpu().numpy() for p in explainer.all_feature_probabilities()]
     eps = 1e-30
 
+    true_scores = mps.anomaly_score(x, batch_size=4096).cpu().numpy()
     x_np = x.numpy()
     n, num = x_np.shape
+    fc = family_code.numpy()
+    ia = is_attack.numpy()
+    fam_lookup = np.array(family_names, dtype=object)
+
     attrib = np.zeros((n, num))
     for site in range(num):
-        p = marginals[site][x_np[:, site]]
-        attrib[:, site] = -np.log(np.clip(p, eps, None))
+        attrib[:, site] = -np.log(np.clip(marginals[site][x_np[:, site]], eps, None))
     attribution_sum = attrib.sum(axis=1)
-    true_nll = mps.anomaly_score(x, batch_size=4096).cpu().numpy()
-    residual = true_nll - attribution_sum
+    residual = true_scores - attribution_sum
+    share = np.abs(residual) / np.clip(true_scores, eps, None)
 
-    fc = family_code.numpy()
-    header = (["family", "n", "mean_true_nll", "mean_attribution_sum",
-               "mean_correlation_residual"] + [f"nll[{nm}]" for nm in names])
-    lines = [",".join(header)]
-    for code, fname in enumerate(family_names):
-        mask = fc == code
-        if not mask.any():
-            continue
-        per_feat = attrib[mask].mean(axis=0)
-        rec = ([fname, int(mask.sum()),
-                f"{true_nll[mask].mean():.4f}",
-                f"{attribution_sum[mask].mean():.4f}",
-                f"{residual[mask].mean():.4f}"]
-               + [f"{v:.4f}" for v in per_feat])
-        lines.append(",".join(str(c) for c in rec))
-    out_csv.write_text("\n".join(lines) + "\n")
+    # restrict to clearly anomalous connections so the share is meaningful
+    floor = np.percentile(true_scores, nll_percentile)
+    pool = np.where(true_scores >= floor)[0]
+    by_share = pool[np.argsort(share[pool])]
+
+    # NSL-KDD contains exact duplicate connections, so pick *distinct* ones
+    def take_distinct(order, k):
+        seen, out = set(), []
+        for r in order:
+            key = tuple(int(v) for v in x_np[r])
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(int(r))
+            if len(out) >= k:
+                break
+        return out
+
+    low = take_distinct(by_share, n_each)        # value anomalies (reliable)
+    high = take_distinct(by_share[::-1], n_each)  # correlation anomalies (misleading)
+    selected = sorted(set(low) | set(high), key=lambda r: share[r])
+
+    header = (["family", "row", "is_attack", "true_nll",
+               "attribution_sum", "correlation_residual", "correlation_share"]
+              + [f"nll[{nm}]" for nm in names])
+    rows: List[List] = []
+    for row in selected:
+        fam = fam_lookup[fc[row]] if 0 <= fc[row] < len(fam_lookup) else str(fc[row])
+        record = ([fam, int(row), int(ia[row]),
+                   f"{true_scores[row]:.4f}", f"{attribution_sum[row]:.4f}",
+                   f"{residual[row]:.4f}", f"{share[row]:.4f}"]
+                  + [f"{v:.4f}" for v in attrib[row]])
+        rows.append(record)
+    _write_csv(out_csv, header, rows)
 
 # ----------------------------------------------------------------------
 # Bond entropy
@@ -413,17 +382,18 @@ def bond_entropy(
     entropies = explainer.bond_entropies()
     bond_dims = explainer.mps.bond_dims
 
-    header = "bond,left_feature,right_feature,bond_dim,entropy,max_entropy,saturation"
-    lines = [header]
+    header = ["bond", "left_feature", "right_feature", "bond_dim",
+              "entropy", "max_entropy", "saturation"]
+    rows: List[List] = []
     for k, s in enumerate(entropies):
         d_k = bond_dims[k]
         max_s = float(np.log(d_k)) if d_k > 1 else 0.0
         saturation = (s / max_s) if max_s > 0 else 0.0
-        lines.append(
-            f"{k},{names[k]},{names[k + 1]},{d_k},"
-            f"{s:.8f},{max_s:.8f},{saturation:.8f}"
-        )
-    out_csv.write_text("\n".join(lines) + "\n")
+        rows.append([
+            k, names[k], names[k + 1], d_k,
+            f"{s:.8f}", f"{max_s:.8f}", f"{saturation:.8f}",
+        ])
+    _write_csv(out_csv, header, rows)
 
 # ----------------------------------------------------------------------
 # Conditional probabilities
@@ -453,13 +423,24 @@ def conditional_probabilities(
     unconditional = explainer.feature_probabilities(site_i).cpu().numpy()
     conditioned = explainer.conditional_probabilities(site_i, site_j, value_j).cpu().numpy()
 
-    labels = value_labels(schema, site_i)
-    header = "value_index,value_label,not_conditioned,conditioned"
-    lines = [header]
+    labels_i = value_labels(schema, site_i)
+    labels_j = value_labels(schema, site_j)
+    fname_i, fname_j = names[site_i], names[site_j]
+    cond_label = labels_j[value_j] if value_j < len(labels_j) else str(value_j)
+    header = [
+        "feature_i", "value_index", "value_i_label",
+        "feature_j", "value_j_index", "value_j_label",
+        "not_conditioned", "conditioned",
+    ]
+    rows: List[List] = []
     for k in range(physical_dims[site_i]):
-        lab = labels[k] if k < len(labels) else str(k)
-        lines.append(f"{k},{lab},{unconditional[k]:.6f},{conditioned[k]:.6f}")
-    out_csv.write_text("\n".join(lines) + "\n")
+        lab = labels_i[k] if k < len(labels_i) else str(k)
+        rows.append([
+            fname_i, k, lab,
+            fname_j, value_j, cond_label,
+            f"{unconditional[k]:.6f}", f"{conditioned[k]:.6f}",
+        ])
+    _write_csv(out_csv, header, rows)
 
 # ----------------------------------------------------------------------
 # Joint probabilities (two-feature co-occurrence)
@@ -499,10 +480,10 @@ def joint_probabilities(
     labels_i = value_labels(schema, site_i)
     labels_j = value_labels(schema, site_j)
 
-    header = ("feature_i,value_i_index,value_i_label,"
-              "feature_j,value_j_index,value_j_label,"
-              "joint,independent,lift")
-    lines = [header]
+    header = ["feature_i", "value_i_index", "value_i_label",
+              "feature_j", "value_j_index", "value_j_label",
+              "joint", "independent", "lift"]
+    rows: List[List] = []
     for vi in range(physical_dims[site_i]):
         lab_i = labels_i[vi] if vi < len(labels_i) else str(vi)
         for vj in range(physical_dims[site_j]):
@@ -510,12 +491,12 @@ def joint_probabilities(
             j = joint[vi, vj]
             ind = independent[vi, vj]
             lift = j / (ind + eps)
-            lines.append(
-                f"{names[site_i]},{vi},{lab_i},"
-                f"{names[site_j]},{vj},{lab_j},"
-                f"{j:.8f},{ind:.8f},{lift:.6f}"
-            )
-    out_csv.write_text("\n".join(lines) + "\n")
+            rows.append([
+                names[site_i], vi, lab_i,
+                names[site_j], vj, lab_j,
+                f"{j:.8f}", f"{ind:.8f}", f"{lift:.6f}",
+            ])
+    _write_csv(out_csv, header, rows)
 
 
 
@@ -545,7 +526,7 @@ def _save(fig: plt.Figure, out_path: Path) -> None:
 # Direct probability extraction  (empirical frequency vs MPS marginal)
 # ----------------------------------------------------------------------
 def plot_probability_extraction(
-    csv_dir: Path, out_dir: Path, max_panels: int = 12
+    csv_dir: Path, out_dir: Path, max_panels: int = 3
 ) -> None:
     df = _read(csv_dir, "probability_extraction.csv")
     if df is None:
@@ -570,19 +551,21 @@ def plot_probability_extraction(
         name = sub["feature"].iloc[0]
         idx = sub["value_index"].to_numpy()
         width = 0.4
-        ax.bar(idx - width / 2, sub["freq_prob"], width, label="Freq.", color="0.2")
+        ax.bar(idx - width / 2, sub["freq_prob"], width, label="Frec.", color="0.2")
         ax.bar(idx + width / 2, sub["mps_prob"], width, label="MPS", color="crimson")
         ax.set_yscale("log")
-        ax.set_title(f"[{site}] {name}", fontsize=9)
-        ax.set_xlabel("value index", fontsize=8)
-        ax.tick_params(labelsize=7)
+        ax.set_title(f"[{site}] {name}", fontsize=10)
+        labels = sub["value_label"].astype(str).tolist()
+        ax.set_xticks(idx)
+        ax.set_xticklabels(labels, rotation=90, fontsize=FS_DENSE)
+        ax.tick_params(axis="y", labelsize=10)
     for j in range(len(sites), len(axes)):
         axes[j].axis("off")
 
-    axes[0].set_ylabel("probability")
+    axes[0].set_ylabel("probabilidad")
     handles, labels = axes[0].get_legend_handles_labels()
-    fig.legend(handles, labels, loc="upper right", fontsize=9)
-    fig.suptitle("Empirical frequency vs MPS-derived marginals", fontsize=11)
+    fig.legend(handles, labels, loc="upper right", fontsize=11)
+    fig.suptitle("Frecuencia empírica frente a marginales del MPS", fontsize=13)
     fig.tight_layout(rect=(0, 0, 1, 0.96))
     _save(fig, out_dir / "probability_extraction.png")
 
@@ -598,14 +581,14 @@ def plot_vn_entropy(csv_dir: Path, out_dir: Path) -> None:
     names = df["feature"].tolist()
     entropies = df["entropy"].to_numpy()
 
-    fig, ax = plt.subplots(figsize=(max(8, 0.45 * len(names)), 4.0))
+    fig, ax = plt.subplots(figsize=(max(8, 0.30 * len(names)), 4.0))
     denom = max(entropies.max(), 1e-12)
     ax.bar(np.arange(len(names)), entropies, color=plt.cm.viridis(entropies / denom))
     ax.set_xticks(np.arange(len(names)))
-    ax.set_xticklabels(names, rotation=90, fontsize=7)
-    ax.set_ylabel("von Neumann entropy  S(rho_k)")
-    ax.set_title("Single-site von Neumann entropy "
-                 "(higher = more entangled with the rest)")
+    ax.set_xticklabels(names, rotation=90, fontsize=FS_DENSE)
+    ax.set_ylabel("entropía de Von Neumann  S(rho_k)")
+    ax.set_title("Entropía de Von Neumann por sitio "
+                 "(mayor = más entrelazada con el resto)")
     _save(fig, out_dir / "vn_entropy.png")
 
 
@@ -622,14 +605,15 @@ def plot_mutual_information(csv_dir: Path, out_dir: Path) -> None:
     mi_display = mi.copy()
     np.fill_diagonal(mi_display, np.nan)  # diagonal holds single-site entropy
 
-    fig, ax = plt.subplots(figsize=(8.5, 7.5))
+    fig, ax = plt.subplots(figsize=(8.5, 7.5), layout="constrained")
     im = ax.imshow(mi_display, cmap="hot", interpolation="nearest")
     ax.set_xticks(np.arange(len(names)))
     ax.set_yticks(np.arange(len(names)))
-    ax.set_xticklabels(names, rotation=90, fontsize=6)
-    ax.set_yticklabels(names, fontsize=6)
-    ax.set_title("Mutual information between features  I(i;j)")
-    fig.colorbar(im, ax=ax, shrink=0.8, label="mutual information")
+    ax.set_xticklabels(names, rotation=90, fontsize=FS_DENSE)
+    ax.set_yticklabels(names, fontsize=FS_DENSE)
+    ax.set_title("Información mutua entre características  I(i;j)")
+    cbar = fig.colorbar(im, ax=ax, shrink=0.8)
+    cbar.set_label("información mutua", fontsize=11)
     _save(fig, out_dir / "mutual_information.png")
 
 
@@ -646,36 +630,66 @@ def plot_feature_importance(csv_dir: Path, out_dir: Path) -> None:
     width = 0.4
 
     fig, (ax1, ax2) = plt.subplots(
-        2, 1, figsize=(max(8, 0.45 * len(names)), 8.0)
+        2, 1, figsize=(max(11, 0.34 * len(names)), 9.0), layout="constrained"
     )
 
     ax1.bar(idx - width / 2, df["mean_prob_benign"], width,
-            label="benign", color="steelblue")
+            label="benigno", color="steelblue")
     ax1.bar(idx + width / 2, df["mean_prob_attack"], width,
-            label="attack", color="indianred")
+            label="ataque", color="indianred")
     ax1.set_xticks(idx)
-    ax1.set_xticklabels(names, rotation=90, fontsize=7)
-    ax1.set_ylabel("mean P_i(observed value)")
-    ax1.set_title("Feature importance: mean marginal probability (benign vs attack)")
-    ax1.legend()
+    ax1.set_xticklabels(names, rotation=90, fontsize=FS_DENSE)
+    ax1.set_ylabel("P_i(valor observado) media")
+    ax1.set_title("Importancia de características: probabilidad marginal media (benigno vs ataque)")
+    # headroom so the legend sits above the bars instead of covering them
+    ax1.set_ylim(top=ax1.get_ylim()[1] * 1.25)
+    ax1.legend(ncol=2, loc="upper left", framealpha=0.9)
 
     # discriminative gap, sorted
     gap = df.sort_values("discriminative_gap", ascending=False)
     colors = ["seagreen" if g >= 0 else "firebrick" for g in gap["discriminative_gap"]]
     ax2.bar(np.arange(len(gap)), gap["discriminative_gap"], color=colors)
     ax2.set_xticks(np.arange(len(gap)))
-    ax2.set_xticklabels(gap["feature"], rotation=90, fontsize=7)
-    ax2.set_ylabel("benign - attack")
-    ax2.set_title("Discriminative gap (sorted)")
+    ax2.set_xticklabels(gap["feature"], rotation=90, fontsize=FS_DENSE)
+    ax2.set_ylabel("benigno - ataque")
+    ax2.set_title("Brecha discriminativa (ordenada)")
     ax2.axhline(0.0, color="0.3", linewidth=0.8)
 
-    fig.tight_layout()
     _save(fig, out_dir / "feature_importance.png")
 
 
 # ----------------------------------------------------------------------
 # Anomaly breakdown  (per-feature NLL of the top anomalies)
 # ----------------------------------------------------------------------
+def _share_color(c: float) -> str:
+    """Reliability colour of a per-feature breakdown given its correlation
+    share: green if the marginal attributions explain the score, amber if
+    correlations carry a noticeable part, red if they dominate."""
+    if c < 0.2:
+        return "seagreen"
+    if c < 0.5:
+        return "goldenrod"
+    return "indianred"
+
+
+def _plot_correlation_share(ax, shares, ypos) -> None:
+    """Horizontal bar of the correlation share (|residual| / true NLL) for
+    each row, aligned with a heatmap that shares the same rows."""
+    shares = np.asarray(shares, dtype=float)
+    xmax = max(1.0, float(shares.max()) * 1.10) if shares.size else 1.0
+    ax.barh(ypos, shares, color=[_share_color(c) for c in shares])
+    ax.set_xlim(0, xmax)
+    for xv in (0.2, 0.5):
+        ax.axvline(xv, color="0.6", lw=0.8, ls=":")
+    if xmax > 1.0:
+        ax.axvline(1.0, color="0.6", lw=0.8, ls="--")
+    ax.set_yticks([])
+    ax.set_title("cuota de correlación", fontsize=10)
+    for y, c in zip(ypos, shares):
+        ax.text(c + 0.02 * xmax, y, f"{c * 100:.0f}%",
+                va="center", ha="left", fontsize=FS_CELL)
+
+
 def plot_anomaly_breakdown(csv_dir: Path, out_dir: Path) -> None:
     df = _read(csv_dir, "anomaly_breakdown.csv")
     if df is None:
@@ -683,38 +697,39 @@ def plot_anomaly_breakdown(csv_dir: Path, out_dir: Path) -> None:
 
     nll_cols = [c for c in df.columns if c.startswith("nll[")]
     feat_names = [c[len("nll["):-1] for c in nll_cols]
-    matrix = df[nll_cols].to_numpy(dtype=float)          # (top_k, n_features)
-    ranks = df["rank"].to_numpy()
+    matrix = df[nll_cols].to_numpy(dtype=float)          # (n_rows, n_features)
+    families = df["family"].astype(str).tolist()
     is_attack = df["is_attack"].to_numpy()
+    residual = df["correlation_residual"].to_numpy(dtype=float)
+    nrows = len(df)
+    labels = [f"{fam} ({'atq' if a else 'ben'})"
+              for fam, a in zip(families, is_attack)]
 
+    # heatmap (left) + correlation-residual gap per anomaly (right), sharing rows
     fig, (ax1, ax2) = plt.subplots(
-        2, 1, figsize=(max(9, 0.45 * len(feat_names)), 9.0),
-        gridspec_kw={"height_ratios": [3, 1]},
+        1, 2, figsize=(max(9, 0.30 * len(feat_names)), 1.4 + 0.7 * nrows),
+        gridspec_kw={"width_ratios": [8, 1.8]},
     )
 
-    # heatmap: rows = anomalies, cols = features, colour = per-feature NLL
     im = ax1.imshow(matrix, aspect="auto", cmap="magma", interpolation="nearest")
     ax1.set_xticks(np.arange(len(feat_names)))
-    ax1.set_xticklabels(feat_names, rotation=90, fontsize=6)
-    ax1.set_yticks(np.arange(len(ranks)))
-    ax1.set_yticklabels([f"#{r} ({'atk' if a else 'ben'})"
-                         for r, a in zip(ranks, is_attack)], fontsize=7)
-    ax1.set_title("Per-feature NLL contribution of the top anomalies")
-    fig.colorbar(im, ax=ax1, shrink=0.8, label="NLL contribution")
+    ax1.set_xticklabels(feat_names, rotation=90, fontsize=FS_DENSE)
+    ax1.set_yticks(np.arange(nrows))
+    ax1.set_yticklabels(labels, fontsize=10)
+    ax1.set_title("Contribución NLL por característica")
+    fig.colorbar(im, ax=ax1, fraction=0.025, pad=0.01, label="contribución NLL")
 
-    # true score vs marginal attribution, with the correlation residual
-    x = np.arange(len(ranks))
-    width = 0.4
-    ax2.bar(x - width / 2, df["true_nll"], width, label="true NLL", color="0.25")
-    ax2.bar(x + width / 2, df["attribution_sum"], width,
-            label="sum of attributions", color="darkorange")
-    ax2.plot(x, df["correlation_residual"], "o-", color="teal",
-             label="correlation residual", linewidth=1.2, markersize=4)
-    ax2.set_xticks(x)
-    ax2.set_xticklabels([f"#{r}" for r in ranks], fontsize=7)
-    ax2.set_ylabel("NLL")
-    ax2.set_title("True score vs marginal attribution (gap = correlation residual)")
-    ax2.legend(fontsize=8)
+    # correlation share per anomaly: how much of the score lives in the
+    # correlations -> tells the analyst whether to trust this per-feature
+    # breakdown (low share) or inspect the correlation structure (high share)
+    if "correlation_share" in df.columns:
+        shares = df["correlation_share"].to_numpy(dtype=float)
+    else:
+        tn = df["true_nll"].to_numpy(dtype=float)
+        shares = np.abs(residual) / np.clip(tn, 1e-30, None)
+    ypos = np.arange(nrows)
+    _plot_correlation_share(ax2, shares, ypos)
+    ax2.set_ylim(ax1.get_ylim())          # align (inverted) with heatmap rows
 
     fig.tight_layout()
     _save(fig, out_dir / "anomaly_breakdown.png")
@@ -735,24 +750,25 @@ def plot_bond_entropy(csv_dir: Path, out_dir: Path) -> None:
     labels = [f"{l}|{r}" for l, r in zip(df["left_feature"], df["right_feature"])]
 
     fig, (ax1, ax2) = plt.subplots(
-        2, 1, figsize=(max(9, 0.42 * len(bonds)), 7.5), sharex=True
+        2, 1, figsize=(max(11, 0.34 * len(bonds)), 8.5), sharex=True
     )
 
     ax1.bar(bonds, entropy, color="mediumpurple", label="S(k)")
     ax1.step(bonds, ceiling, where="mid", color="black",
-             linewidth=1.2, label="ceiling  ln(D_k)")
-    ax1.set_ylabel("bond entropy (nats)")
-    ax1.set_title("Bipartite entanglement across each cut vs its capacity ln(D_k)")
-    ax1.legend(fontsize=9)
+             linewidth=1.2, label="cota  ln(D_k)")
+    ax1.set_ylabel("entropía de enlace (nats)")
+    ax1.set_title("Entrelazamiento bipartito en cada corte frente a su capacidad ln(D_k)")
+    # compact two-column legend in the empty top-left corner
+    ax1.legend(fontsize=10, ncol=2, loc="upper left", framealpha=0.9)
 
     colors = plt.cm.RdYlGn_r(np.clip(saturation, 0, 1))
     ax2.bar(bonds, saturation, color=colors)
     ax2.axhline(1.0, color="0.3", linewidth=0.8, linestyle="--")
     ax2.set_ylim(0, max(1.05, float(saturation.max()) * 1.05))
-    ax2.set_ylabel("saturation  S(k)/ln(D_k)")
+    ax2.set_ylabel("saturación  S(k)/ln(D_k)")
     ax2.set_xticks(bonds)
-    ax2.set_xticklabels(labels, rotation=90, fontsize=6)
-    ax2.set_xlabel("bond (left feature | right feature)")
+    ax2.set_xticklabels(labels, rotation=90, fontsize=FS_DENSE)
+    ax2.set_xlabel("enlace (característica izquierda | derecha)")
 
     fig.tight_layout()
     _save(fig, out_dir / "bond_entropy.png")
@@ -766,19 +782,37 @@ def plot_conditional_probabilities(csv_dir: Path, out_dir: Path) -> None:
     if df is None:
         return
     df = df.sort_values("value_index")
-    labels = df["value_label"].astype(str).tolist()
+
+    # value labels of the conditioned feature i (support old CSVs too)
+    label_col = "value_i_label" if "value_i_label" in df.columns else "value_label"
+    labels = df[label_col].astype(str).tolist()
     idx = np.arange(len(labels))
     width = 0.4
 
-    fig, ax = plt.subplots(figsize=(max(7, 0.5 * len(labels)), 4.2))
+    if "feature_i" in df.columns:
+        name_i = str(df["feature_i"].iloc[0])
+        name_j = str(df["feature_j"].iloc[0])
+        cond_label = str(df["value_j_label"].iloc[0])
+        leg_marg = f"P({name_i})"
+        leg_cond = f"P({name_i} | {name_j} = {cond_label})"
+        title = (f"Distribución de {name_i}: marginal frente a "
+                 f"condicionada a {name_j} = {cond_label}")
+        xlabel = f"valor de {name_i}"
+    else:
+        leg_marg, leg_cond = "P(v_i)", "P(v_i | v_j)"
+        title = "Distribución marginal frente a condicional de la característica i"
+        xlabel = "valor"
+
+    fig, ax = plt.subplots(figsize=(max(7, 0.36 * len(labels)), 4.2))
     ax.bar(idx - width / 2, df["not_conditioned"], width,
-           label="P(v_i)", color="slategray")
+           label=leg_marg, color="slategray")
     ax.bar(idx + width / 2, df["conditioned"], width,
-           label="P(v_i | v_j)", color="goldenrod")
+           label=leg_cond, color="goldenrod")
     ax.set_xticks(idx)
-    ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=7)
-    ax.set_ylabel("probability")
-    ax.set_title("Marginal vs conditional distribution of feature i")
+    ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=FS_DENSE)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel("probabilidad")
+    ax.set_title(title)
     ax.legend()
     fig.tight_layout()
     _save(fig, out_dir / "conditional_probabilities.png")
@@ -806,67 +840,22 @@ def plot_joint_probabilities(csv_dir: Path, out_dir: Path) -> None:
                 ["value_j_label"].astype(str).tolist())
 
     vmax = float(np.nanmax(np.abs(log_lift))) or 1.0
-    fig, ax = plt.subplots(figsize=(max(6, 0.6 * grid.shape[1] + 2),
-                                    max(4, 0.6 * grid.shape[0] + 2)))
+    fig, ax = plt.subplots(figsize=(max(6, 0.45 * grid.shape[1] + 2),
+                                    max(4, 0.6 * grid.shape[0] + 2)),
+                           layout="constrained")
     im = ax.imshow(log_lift, cmap="RdBu_r", vmin=-vmax, vmax=vmax,
                    interpolation="nearest", aspect="auto")
     ax.set_xticks(np.arange(grid.shape[1]))
     ax.set_yticks(np.arange(grid.shape[0]))
-    ax.set_xticklabels(labels_j, rotation=45, ha="right", fontsize=7)
-    ax.set_yticklabels(labels_i, fontsize=7)
+    ax.set_xticklabels(labels_j, rotation=45, ha="right", fontsize=FS_DENSE)
+    ax.set_yticklabels(labels_i, fontsize=FS_DENSE)
     ax.set_xlabel(name_j)
     ax.set_ylabel(name_i)
-    ax.set_title("Value co-occurrence: log2 lift  P(v_i,v_j) / (P(v_i)P(v_j))\n"
-                 "red = more than independence, blue = less")
-    fig.colorbar(im, ax=ax, shrink=0.8, label="log2 lift")
-    fig.tight_layout()
+    ax.set_title("Coaparición de valores: \n"
+                 "rojo = más que la independencia, azul = menos")
+    cbar = fig.colorbar(im, ax=ax, shrink=0.8)
+    cbar.set_label("log2 lift", fontsize=11)
     _save(fig, out_dir / "joint_probabilities.png")
-
-
-# ----------------------------------------------------------------------
-# Per-family attribution  (attack signatures: family x feature NLL)
-# ----------------------------------------------------------------------
-def plot_family_attribution(csv_dir: Path, out_dir: Path) -> None:
-    df = _read(csv_dir, "family_attribution.csv")
-    if df is None:
-        return
-
-    nll_cols = [c for c in df.columns if c.startswith("nll[")]
-    feat_names = [c[len("nll["):-1] for c in nll_cols]
-    fam = df["family"].tolist()
-    matrix = df[nll_cols].to_numpy(dtype=float)        # (n_families, n_features)
-
-    fig, (ax1, ax2) = plt.subplots(
-        2, 1, figsize=(max(9, 0.45 * len(feat_names)), 2.0 + 0.6 * len(fam) + 3.0),
-        gridspec_kw={"height_ratios": [len(fam), 3]},
-    )
-
-    # signature heatmap: rows = families, cols = features, colour = mean NLL
-    im = ax1.imshow(matrix, aspect="auto", cmap="magma", interpolation="nearest")
-    ax1.set_xticks(np.arange(len(feat_names)))
-    ax1.set_xticklabels(feat_names, rotation=90, fontsize=6)
-    ax1.set_yticks(np.arange(len(fam)))
-    ax1.set_yticklabels([f"{f} (n={n})" for f, n in zip(fam, df["n"])], fontsize=8)
-    ax1.set_title("Per-family attack signature: mean per-feature NLL contribution")
-    fig.colorbar(im, ax=ax1, shrink=0.8, label="mean NLL")
-
-    # per-family true score vs marginal attribution, with residual
-    x = np.arange(len(fam))
-    width = 0.4
-    ax2.bar(x - width / 2, df["mean_true_nll"], width, label="true NLL", color="0.25")
-    ax2.bar(x + width / 2, df["mean_attribution_sum"], width,
-            label="sum of attributions", color="darkorange")
-    ax2.plot(x, df["mean_correlation_residual"], "o-", color="teal",
-             label="correlation residual", linewidth=1.2, markersize=5)
-    ax2.set_xticks(x)
-    ax2.set_xticklabels(fam, fontsize=8)
-    ax2.set_ylabel("mean NLL")
-    ax2.set_title("Mean score vs marginal attribution per family "
-                  "(gap = correlation residual)")
-    ax2.legend(fontsize=8)
-
-    fig.tight_layout()
-    _save(fig, out_dir / "family_attribution.png")
 
 
 # ----------------------------------------------------------------------
@@ -883,59 +872,20 @@ def plot_family_feature_importance(csv_dir: Path, out_dir: Path) -> None:
     matrix = df[gap_cols].to_numpy(dtype=float).T       # (n_families, n_features)
 
     vmax = float(np.nanmax(np.abs(matrix))) or 1.0
-    fig, ax = plt.subplots(figsize=(max(9, 0.45 * len(feats)),
-                                    2.0 + 0.6 * len(fam_names)))
+    fig, ax = plt.subplots(figsize=(max(11, 0.32 * len(feats)),
+                                    2.6 + 0.7 * len(fam_names)),
+                           layout="constrained")
     im = ax.imshow(matrix, aspect="auto", cmap="RdBu_r",
                    vmin=-vmax, vmax=vmax, interpolation="nearest")
     ax.set_xticks(np.arange(len(feats)))
-    ax.set_xticklabels(feats, rotation=90, fontsize=6)
+    ax.set_xticklabels(feats, rotation=90, fontsize=FS_DENSE)
     ax.set_yticks(np.arange(len(fam_names)))
-    ax.set_yticklabels(fam_names, fontsize=9)
-    ax.set_title("Discriminative gap per family   "
-                 "(normal - family;  red = decisive for that family)")
-    fig.colorbar(im, ax=ax, shrink=0.8, label="gap  P(obs|normal) - P(obs|family)")
-    fig.tight_layout()
+    ax.set_yticklabels(fam_names, fontsize=11)
+    ax.set_title("Brecha discriminativa por familia\n"
+                 "(normal - familia;  rojo = decisiva para esa familia)")
+    cbar = fig.colorbar(im, ax=ax, fraction=0.025, pad=0.012)
+    cbar.set_label("brecha  P(obs|normal) - P(obs|familia)", fontsize=11)
     _save(fig, out_dir / "family_feature_importance.png")
-
-
-# ----------------------------------------------------------------------
-# Per-family probability extraction  (how each family departs from normal)
-# ----------------------------------------------------------------------
-def plot_family_probability_extraction(csv_dir: Path, out_dir: Path) -> None:
-    # parsed manually: value_label may contain a comma and break a CSV reader
-    path = csv_dir / "family_probability_extraction.csv"
-    if not path.exists():
-        logger.warning("skip family_probability_extraction.csv (not found)")
-        return
-
-    disparity = {}          # (family, site) -> disparity
-    feat_of = {}            # site -> feature
-    with path.open() as fh:
-        next(fh)            # header
-        for line in fh:
-            parts = line.rstrip("\n").split(",")
-            family, site, feature = parts[0], int(parts[1]), parts[2]
-            disparity[(family, site)] = float(parts[-1])
-            feat_of[site] = feature
-
-    families = list(dict.fromkeys(k[0] for k in disparity))   # preserve order
-    sites = sorted(feat_of)
-    feats = [feat_of[s] for s in sites]
-    matrix = np.array([[disparity.get((f, s), np.nan) for s in sites]
-                       for f in families])
-
-    fig, ax = plt.subplots(figsize=(max(9, 0.45 * len(feats)),
-                                    2.0 + 0.6 * len(families)))
-    im = ax.imshow(matrix, aspect="auto", cmap="hot", interpolation="nearest")
-    ax.set_xticks(np.arange(len(feats)))
-    ax.set_xticklabels(feats, rotation=90, fontsize=6)
-    ax.set_yticks(np.arange(len(families)))
-    ax.set_yticklabels(families, fontsize=9)
-    ax.set_title("Per-family departure from normal: L1 disparity "
-                 "of empirical vs model marginal")
-    fig.colorbar(im, ax=ax, shrink=0.8, label="L1 disparity")
-    fig.tight_layout()
-    _save(fig, out_dir / "family_probability_extraction.png")
 
 
 # ----------------------------------------------------------------------
@@ -955,9 +905,7 @@ def render_figures(tables_dir: Path, graphs_dir: Path) -> None:
         plot_bond_entropy,
         plot_conditional_probabilities,
         plot_joint_probabilities,
-        plot_family_attribution,
         plot_family_feature_importance,
-        plot_family_probability_extraction,
     ]
     for plotter in plotters:
         try:
@@ -998,13 +946,6 @@ def main(data_dir: Path) -> None:
         explainer, train_x, schema, out_dir / "probability_extraction.csv"
     )
 
-    # Per-family probability extraction
-    logger.info("Family probability extraction -> family_probability_extraction.csv")
-    family_probability_extraction(
-        explainer, test_x, family_code, family_names, schema,
-        out_dir / "family_probability_extraction.csv",
-    )
-
     # Von Neumann entropy
     logger.info("Von Neumann entropy -> vn_entropy.csv")
     vn_entropy(explainer, schema, out_dir / "vn_entropy.csv")
@@ -1030,14 +971,8 @@ def main(data_dir: Path) -> None:
     # Anomaly identification (per-feature NLL breakdown)
     logger.info("Anomaly breakdown -> anomaly_breakdown.csv")
     anomaly_breakdown(
-        mps, explainer, test_x, is_attack, schema, out_dir / "anomaly_breakdown.csv"
-    )
-
-    # Per-family attribution (attack signatures)
-    logger.info("Family attribution -> family_attribution.csv")
-    family_attribution(
-        mps, explainer, test_x, family_code, family_names, schema,
-        out_dir / "family_attribution.csv",
+        mps, explainer, test_x, is_attack, family_code, family_names, schema,
+        out_dir / "anomaly_breakdown.csv"
     )
 
     # Bond entropy

@@ -1,5 +1,28 @@
-"""
-NSL-KDD encoder
+"""NSL-KDD encoder: raw connection records -> discrete MPS sites.
+
+Step 1 of the pipeline. Each MPS site is a categorical variable taking a value
+in ``[0, d_k)``, so every NSL-KDD feature has to be mapped to a small integer
+alphabet. The policy, decided per feature by looking only at *normal* training
+traffic, is:
+
+* string categoricals (``protocol_type``, ``service``, ``flag``) keep their
+  levels, plus an ``UNKNOWN`` slot for values unseen at fit time;
+* a feature that is constant (or nearly so) over normal traffic collapses to a
+  binary "equals the normal value vs differs" site — cheap, and exactly the
+  signal an anomaly detector wants;
+* a feature with only a handful of distinct normal values is treated as
+  discrete, with an ``OTHER`` slot for anything else;
+* remaining numeric features are bucketed into quantile bins fitted on normal
+  traffic.
+
+Fitting on the normal subset matters: the model is trained only on normal data,
+so the encoding should describe what normal looks like and let attacks fall into
+the ``UNKNOWN`` / ``OTHER`` / tail buckets. The fitted state is one
+:class:`FeatureSpec` per feature; ``physical_dims`` is just their ``d`` values
+and is what the MPS constructor needs.
+
+Run as a script it reads ``KDDTrain+.txt`` / ``KDDTest+.txt`` from the data dir
+and writes the encoded tensors, the metadata, and ``encoding_schema.json``.
 """
 
 from __future__ import annotations
@@ -113,6 +136,14 @@ class NSLKDDEncoder:
         max_implicit_categorical: int = 8,
         quasi_constant_threshold: float = 0.95,
     ) -> None:
+        """Configure the fitting thresholds.
+
+        ``target_d_numeric`` is the number of quantile bins for genuinely numeric
+        features. ``max_implicit_categorical`` is the cut-off below which a
+        small-cardinality numeric column is treated as discrete rather than
+        binned. ``quasi_constant_threshold`` is the mode share above which a
+        feature is considered constant-in-normal and collapsed to a binary site.
+        """
         if target_d_numeric < 2:
             raise ValueError("target_d_numeric must be >= 2")
         if max_implicit_categorical < 2:
@@ -156,6 +187,13 @@ class NSLKDDEncoder:
         col: str,
         x_normal: pd.Series,
     ) -> FeatureSpec:
+        """Decide the encoding for a single column from its normal-traffic values.
+
+        Walks the policy in order — string categorical, constant, quasi-constant,
+        low-cardinality discrete, otherwise quantile-binned numeric — and returns
+        the first :class:`FeatureSpec` that fits. ``x_normal`` is this column
+        restricted to the normal rows of the training split.
+        """
         # (1) Categorical string columns
         if col in CATEGORICAL_COLS:
             vocab_seen = sorted(x_normal.astype(str).unique().tolist())
@@ -246,6 +284,13 @@ class NSLKDDEncoder:
         return torch.from_numpy(arr)
 
     def _transform_one(self, spec: FeatureSpec, x: pd.Series) -> np.ndarray:
+        """Apply one fitted ``FeatureSpec`` to a column, returning integer codes.
+
+        Categorical/discrete columns go through the vocab lookup; constant
+        features become a 0/1 same-vs-different flag; numeric features are cut at
+        the fitted bin edges. A value that doesn't fit (unseen category, NaN bin)
+        lands in the spec's catch-all slot or raises if there isn't one.
+        """
         n = len(x)
         if spec.kind == "categorical":
             return self._encode_categorical(spec, x.astype(str))
@@ -269,6 +314,14 @@ class NSLKDDEncoder:
         raise ValueError(f"unknown FeatureSpec.kind: {spec.kind!r}")
 
     def _encode_categorical(self, spec: FeatureSpec, x: pd.Series) -> np.ndarray:
+        """Map values to vocab indices, routing misses to the catch-all slot.
+
+        Builds (and caches) the value->index map on first use. For ``discrete``
+        specs the "miss" slot is ``OTHER`` and float values are matched to the
+        nearest vocab entry within tolerance; for string ``categorical`` specs it
+        is ``UNKNOWN``. Either way an out-of-vocab value never raises here — it
+        gets the catch-all index, which is the whole point of those slots.
+        """
         if spec._vocab_map is None:
             spec._vocab_map = {v: i for i, v in enumerate(spec.vocab)}
         mapping = spec._vocab_map
@@ -304,13 +357,24 @@ class NSLKDDEncoder:
 
     @property
     def physical_dims(self) -> List[int]:
+        """Per-site physical dimensions ``[s.d for s in specs]`` — the MPS shape."""
         return [s.d for s in self.specs]
 
     @property
     def feature_names(self) -> List[str]:
+        """Feature name at each site, in MPS order."""
         return [s.name for s in self.specs]
 
     def schema_dict(self) -> Dict:
+        """Serialisable description of the fitted encoding.
+
+        One entry per site (name, kind, dimension, and whichever of vocab / bin
+        edges / normal value applies) plus the top-level ``physical_dims``. This
+        is what gets written to ``encoding_schema.json`` and later read back by
+        training, evaluation and explainability so they agree on the layout.
+        ``None`` vocab entries are surfaced as ``"OTHER"`` and infinite bin edges
+        as ``null``.
+        """
         out: List[Dict] = []
         for i, s in enumerate(self.specs):
             entry = {
@@ -338,6 +402,13 @@ class NSLKDDEncoder:
 # ----------------------------------------------------------------------
 
 def load_split(path: Path) -> pd.DataFrame:
+    """Read one NSL-KDD split and attach the derived label columns.
+
+    Loads the headerless CSV, names the columns, strips the trailing dot some
+    labels carry, and adds ``family`` (dos/probe/r2l/u2r/normal) and the binary
+    ``is_attack``. Raises if the column count is wrong or a label isn't in the
+    known attack-family map.
+    """
     df = pd.read_csv(path, header=None)
     if df.shape[1] != len(COLUMNS):
         raise ValueError(f"{path.name}: esperadas {len(COLUMNS)} columnas, halladas {df.shape[1]}")
@@ -371,6 +442,14 @@ def build_meta(df: pd.DataFrame) -> Dict[str, torch.Tensor]:
 # ----------------------------------------------------------------------
 
 def main(data_dir: Path) -> None:
+    """Fit the encoder on the train split and write all encoder artefacts.
+
+    Reads ``KDDTrain+.txt`` / ``KDDTest+.txt`` from ``data_dir``, fits the
+    encoding on training data, transforms both splits, sanity-checks that every
+    encoded column stays inside its declared range, and writes the encoded
+    tensors, per-split metadata and ``encoding_schema.json`` back into the same
+    directory for the training step to pick up.
+    """
     train = load_split(data_dir / "KDDTrain+.txt")
     test = load_split(data_dir / "KDDTest+.txt")
     logger.info("loaded: %d train rows, %d test rows", len(train), len(test))

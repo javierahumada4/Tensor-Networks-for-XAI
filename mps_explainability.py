@@ -42,12 +42,26 @@ from mps import MPS, MPSShapeError
 
 
 class MPSExplainer:
-    """Reduced density matrices and information-theoretic diagnostics."""
+    """Reduced density matrices and information measures for a trained MPS.
+
+    Everything here is read-only diagnostics: given the converged state, what did
+    it learn about each feature and about the correlations between features? The
+    building block is the reduced density matrix (RDM) for one or two sites,
+    obtained by contracting the rest of the chain into left/right transfer
+    environments. From the RDMs come marginal and joint probabilities,
+    von Neumann and bond entropies, and the mutual-information matrix used to
+    judge (and potentially reorder) the feature layout.
+
+    The transfer environments are cached on the explainer, not the MPS, so they
+    can't notice if you mutate the underlying state. After any in-place change
+    call :meth:`invalidate_environment_cache` or build a new explainer.
+    """
 
     # ==================================================================
     # Construction & cache management
     # ==================================================================
     def __init__(self, mps: MPS) -> None:
+        """Wrap an MPS; the environment cache starts empty (lazy)."""
         self.mps = mps
         self._cached_left: Optional[List[torch.Tensor]] = None
         self._cached_right: Optional[List[torch.Tensor]] = None
@@ -85,6 +99,11 @@ class MPSExplainer:
     # ==================================================================
     @torch.no_grad()
     def _apply_transfer_left(self, left_environment: torch.Tensor, site_tensor: torch.Tensor) -> torch.Tensor:
+        """Push a left environment through one site (sum over its physical leg).
+
+        This is the transfer-matrix step ``E -> sum_s A_s^dag E A_s`` that grows
+        the contracted left part of ``<Psi|Psi>`` by one site.
+        """
         matrices = self.mps._as_matrices(site_tensor)
         left_times_conjugate = torch.matmul(left_environment, matrices.conj())
         per_site = torch.matmul(matrices.transpose(1, 2), left_times_conjugate)
@@ -92,6 +111,7 @@ class MPSExplainer:
 
     @torch.no_grad()
     def _apply_transfer_right(self, right_environment: torch.Tensor, site_tensor: torch.Tensor) -> torch.Tensor:
+        """Push a right environment through one site (mirror of the left step)."""
         matrices = self.mps._as_matrices(site_tensor)
         matrices_times_right = torch.matmul(matrices, right_environment)
         per_site = torch.matmul(matrices_times_right, matrices.conj().transpose(1, 2))

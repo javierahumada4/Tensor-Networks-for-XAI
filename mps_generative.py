@@ -23,9 +23,20 @@ from mps import MPS, MPSShapeError, MPSNumericalError
 
 
 class MPSSampler:
-    """Exact sampler for the Born-machine distribution P(v) = |Psi(v)|^2 / Z."""
+    """Exact, autoregressive sampler for ``P(v) = |Psi(v)|^2 / Z``.
+
+    Sampling an MPS is exact (no MCMC): canonicalise the chain so the norm sits
+    at one end, then draw sites one at a time, each from the correct conditional
+    given the sites already chosen. The per-sample boundary vector is carried
+    along so a whole batch is drawn in lockstep.
+
+    The sampler keeps a reference to the MPS and *canonicalises it in place*. Pass
+    ``preserve_state=True`` to any public method to snapshot and restore the
+    tensors so the caller's MPS comes back untouched.
+    """
 
     def __init__(self, mps: MPS) -> None:
+        """Wrap the MPS to sample from; methods may canonicalise it in place."""
         self.mps = mps
 
     @staticmethod
@@ -68,8 +79,11 @@ class MPSSampler:
 
     @torch.no_grad()
     def sample(self, num_samples: int = 1, preserve_state: bool = False) -> torch.Tensor:
-        """
-        Draw exact, independent samples from P(v) = |Ψ(v)|² / Z.
+        """Draw ``num_samples`` independent samples from ``P(v) = |Psi(v)|^2 / Z``.
+
+        Returns a ``(num_samples, num_sites)`` long tensor. Set
+        ``preserve_state=True`` if you need the MPS left exactly as it was — the
+        draw left-canonicalises it in place otherwise.
         """
         if num_samples < 1:
             raise ValueError(f"num_samples must be >= 1, got {num_samples}")
@@ -84,6 +98,13 @@ class MPSSampler:
         return self._sample_left_canonical(num_samples)
 
     def _sample_left_canonical(self, num_samples: int) -> torch.Tensor:
+        """Unconditional draw: left-canonicalise, then sample right-to-left.
+
+        After left-canonicalisation the right boundary carries the norm, so the
+        last site's marginal is read straight off its tensor. Each earlier site
+        is then sampled from its conditional given the already-chosen suffix,
+        whose contribution is summarised by the running vector ``x``.
+        """
         self.mps.left_canonicalize()
  
         device = self.mps.site_tensors[0].device
@@ -136,9 +157,12 @@ class MPSSampler:
         num_samples: int = 1,
         preserve_state: bool = False,
     ) -> torch.Tensor:
-        """
-        Conditional sampling: generate completions for partially known
-        configurations.
+        """Complete partially-observed configurations by sampling the rest.
+
+        ``known`` holds a value for every site but only the positions flagged
+        ``True`` in ``mask`` are treated as fixed; the rest are drawn from their
+        conditional ``P(free | fixed)``. Returns ``(num_samples, num_sites)``
+        with the fixed columns copied through unchanged.
         """
         if num_samples < 1:
             raise ValueError(f"num_samples must be >= 1, got {num_samples}")
@@ -170,6 +194,16 @@ class MPSSampler:
         mask: torch.Tensor,
         num_samples: int = 1,
     ) -> torch.Tensor:
+        """Pick the cheapest conditional-sampling routine for this mask.
+
+        Three cases, in increasing cost. If the fixed sites all sit to one side
+        of the free ones, a single canonicalisation puts the chain in the right
+        gauge and one ordinary sweep does the job
+        (:meth:`_sample_conditional_right_to_left` /
+        ``_left_to_right``). Fixed sites interleaved with free ones need the
+        general ladder contraction (:meth:`_sample_conditional_scattered`).
+        Degenerate masks (nothing fixed / everything fixed) short-circuit.
+        """
         N = self.mps.num_sites
         device = self.mps.site_tensors[0].device
 
@@ -209,8 +243,13 @@ class MPSSampler:
         mask: torch.Tensor,
         num_samples: int,
     ) -> torch.Tensor:
+        """Conditional draw when every fixed site is at the right end.
+
+        Left-canonicalise, then sweep right-to-left as in the unconditional case,
+        except that at a fixed site we skip the multinomial and clamp the value
+        to ``known``. The suffix vector ``x`` still threads through so free sites
+        see the correct conditional.
         """
-        Conditional sampling with fixed bits at the right end of the chain."""
         self.mps.left_canonicalize()
  
         device = self.mps.site_tensors[0].device
@@ -263,8 +302,10 @@ class MPSSampler:
         mask: torch.Tensor,
         num_samples: int,
     ) -> torch.Tensor:
-        """
-        Conditional sampling with fixed bits at the left end of the chain.
+        """Conditional draw when every fixed site is at the left end.
+
+        Mirror of the right-to-left case: right-canonicalise from site 1 and
+        sweep left-to-right, clamping fixed sites and sampling the rest.
         """
         self.mps.right_canonicalize(from_site=1)
  
@@ -318,8 +359,14 @@ class MPSSampler:
         mask: torch.Tensor,
         num_samples: int,
     ) -> torch.Tensor:
-        """
-        Conditional sampling for scattered masks via ladder contraction.
+        """General conditional draw for fixed sites scattered through the chain.
+
+        No single gauge makes this a plain sweep, so we precompute right
+        environments that already have the fixed sites projected onto their known
+        values (the ``right_masked`` ladder), then sweep left-to-right. At each
+        free site the weight of every candidate value is its squared amplitude
+        folded against that masked right environment, giving the exact
+        conditional; fixed sites are clamped.
         """
         device = self.mps.site_tensors[0].device
         N = self.mps.num_sites

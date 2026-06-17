@@ -354,6 +354,7 @@ def shift_diagnostics(
     this) and the precision figures should be read with caution.
     """
     def pct(a: np.ndarray) -> Dict[str, float]:
+        """Summarise an array by its 50/90/95/99th percentiles."""
         return {f"p{p}": float(np.percentile(a, p)) for p in (50, 90, 95, 99)}
 
     realised = {
@@ -390,12 +391,14 @@ def _read(csv_dir: Path, name: str, **kwargs) -> "pd.DataFrame | None":
 
 
 def _save(fig: plt.Figure, out_path: Path) -> None:
+    """Save a figure at the configured DPI and close it."""
     fig.savefig(out_path, dpi=SAVE_DPI)
     plt.close(fig)
     logger.info("wrote %s", out_path.name)
 
 
 def plot_score_histograms(csv_dir: Path, out_dir: Path) -> None:
+    """Overlaid NLL histograms for normal vs attack test traffic."""
     df = _read(csv_dir, "test_scores.csv")
     if df is None:
         return
@@ -421,6 +424,7 @@ def plot_score_histograms(csv_dir: Path, out_dir: Path) -> None:
 
 
 def plot_roc_pr(csv_dir: Path, out_dir: Path) -> None:
+    """ROC and precision-recall curves with their AUROC/AUPRC annotated."""
     df = _read(csv_dir, "test_scores.csv")
     gm = _read(csv_dir, "global_metrics.csv")
     if df is None or gm is None:
@@ -459,6 +463,7 @@ def plot_roc_pr(csv_dir: Path, out_dir: Path) -> None:
 
 
 def plot_threshold_sweep(csv_dir: Path, out_dir: Path) -> None:
+    """Detection metrics as the threshold moves across normal-NLL percentiles."""
     df = _read(csv_dir, "threshold_sweep.csv")
     if df is None:
         return
@@ -483,6 +488,7 @@ def plot_threshold_sweep(csv_dir: Path, out_dir: Path) -> None:
 
 
 def plot_confusion(csv_dir: Path, out_dir: Path) -> None:
+    """Confusion matrix at the chosen operating threshold."""
     df = _read(csv_dir, "metrics_per_threshold.csv")
     if df is None:
         return
@@ -547,6 +553,7 @@ def render_figures(tables_dir: Path, graphs_dir: Path) -> None:
 # ----------------------------------------------------------------------
 
 def _write_csv(path: Path, header: List[str], rows: List[List]) -> None:
+    """Write a header + rows to ``path`` with the csv module (handles quoting)."""
     with path.open("w", newline="") as fh:
         writer = csv.writer(fh)
         writer.writerow(header)
@@ -700,6 +707,14 @@ def write_tables(
 # ----------------------------------------------------------------------
 
 def main(data_dir: Path) -> None:
+    """Score the test set, write all metric tables, render the figures, report.
+
+    Loads the trained MPS and the held-out normal split, fixes the threshold from
+    the normal NLL percentile (never from attack data), scores test traffic and
+    breaks the results down globally and by attack family and difficulty. Writes
+    the CSV tables and PNG figures under ``evaluate_tables/`` and
+    ``evaluate_graphs/``, plus a machine-readable ``eval_report.json``.
+    """
     tables_dir = data_dir / "evaluate_tables"
     graphs_dir = data_dir / "evaluate_graphs"
     tables_dir.mkdir(parents=True, exist_ok=True)

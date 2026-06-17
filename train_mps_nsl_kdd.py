@@ -154,6 +154,14 @@ def check_columns_within_dims(x: torch.Tensor, physical_dims: list[int]) -> None
 
 # ----------------------------------------------------------------------
 def main(data_dir: Path) -> None:
+    """Train the MPS on normal traffic and save the model + history.
+
+    Loads the physical dimensions and the normal-only training rows produced by
+    the encoder, splits off a normal validation set (used both for early stopping
+    and, later, for threshold calibration), builds a small MPS and runs DMRG with
+    the module-level :data:`CONFIG`. Writes ``mps_trained.pt`` and the training
+    history/log into ``data_dir``.
+    """
     seed = CONFIG.seed if CONFIG.seed is not None else 0
     torch.manual_seed(seed)
 

@@ -67,6 +67,7 @@ def _write_csv(path: Path, header: List[str], rows: List[List]) -> None:
 # Loading
 # ----------------------------------------------------------------------
 def load_schema(data_dir: Path) -> dict:
+    """Read ``encoding_schema.json`` written by the encoder."""
     schema_path = data_dir / "encoding_schema.json"
     if not schema_path.exists():
         raise FileNotFoundError(f"Missing {schema_path.name}; run encoder_nsl_kdd.py first.")
@@ -74,6 +75,7 @@ def load_schema(data_dir: Path) -> dict:
 
 
 def feature_names(schema: dict) -> List[str]:
+    """Feature name for each site, in schema order."""
     return [f["name"] for f in schema["features"]]
 
 
@@ -103,6 +105,7 @@ def value_labels(schema: dict, site: int) -> List[str]:
 
 
 def load_split(data_dir: Path, split: str) -> Tuple[torch.Tensor, dict]:
+    """Load the encoded tensor and metadata for ``"train"`` or ``"test"``."""
     x_path = data_dir / f"{split}_X.pt"
     meta_path = data_dir / f"{split}_meta.pt"
     if not x_path.exists() or not meta_path.exists():
@@ -329,6 +332,7 @@ def anomaly_breakdown(
 
     # NSL-KDD contains exact duplicate connections, so pick *distinct* ones
     def take_distinct(order, k):
+        """Take the first ``k`` rows in ``order`` that are distinct configurations."""
         seen, out = set(), []
         for r in order:
             key = tuple(int(v) for v in x_np[r])
@@ -517,6 +521,7 @@ def _read(csv_dir: Path, name: str, **kwargs) -> Optional[pd.DataFrame]:
 
 
 def _save(fig: plt.Figure, out_path: Path) -> None:
+    """Save a figure (tight bounding box) at the configured DPI and close it."""
     fig.savefig(out_path, dpi=DPI, bbox_inches="tight")
     plt.close(fig)
     logger.info("wrote %s", out_path.name)
@@ -528,6 +533,7 @@ def _save(fig: plt.Figure, out_path: Path) -> None:
 def plot_probability_extraction(
     csv_dir: Path, out_dir: Path, max_panels: int = 3
 ) -> None:
+    """Model vs empirical marginals for a few features, as paired bar panels."""
     df = _read(csv_dir, "probability_extraction.csv")
     if df is None:
         return
@@ -574,6 +580,7 @@ def plot_probability_extraction(
 # Single-site von Neumann entropy
 # ----------------------------------------------------------------------
 def plot_vn_entropy(csv_dir: Path, out_dir: Path) -> None:
+    """Per-site von Neumann entropy as a bar chart over features."""
     df = _read(csv_dir, "vn_entropy.csv")
     if df is None:
         return
@@ -596,6 +603,7 @@ def plot_vn_entropy(csv_dir: Path, out_dir: Path) -> None:
 # Mutual information heatmap
 # ----------------------------------------------------------------------
 def plot_mutual_information(csv_dir: Path, out_dir: Path) -> None:
+    """Mutual-information matrix between features, as a heatmap."""
     df = _read(csv_dir, "mutual_information.csv", index_col=0)
     if df is None:
         return
@@ -621,6 +629,7 @@ def plot_mutual_information(csv_dir: Path, out_dir: Path) -> None:
 # Feature importance  (benign vs attack marginal of observed value)
 # ----------------------------------------------------------------------
 def plot_feature_importance(csv_dir: Path, out_dir: Path) -> None:
+    """Features ranked by how much they shift the NLL when perturbed."""
     df = _read(csv_dir, "feature_importance.csv")
     if df is None:
         return
@@ -691,6 +700,7 @@ def _plot_correlation_share(ax, shares, ypos) -> None:
 
 
 def plot_anomaly_breakdown(csv_dir: Path, out_dir: Path) -> None:
+    """Per-feature contribution to the anomaly score, attacks vs normal."""
     df = _read(csv_dir, "anomaly_breakdown.csv")
     if df is None:
         return
@@ -739,6 +749,7 @@ def plot_anomaly_breakdown(csv_dir: Path, out_dir: Path) -> None:
 # Bond entropy  (entanglement that crosses each cut, vs the ln(D) ceiling)
 # ----------------------------------------------------------------------
 def plot_bond_entropy(csv_dir: Path, out_dir: Path) -> None:
+    """Bipartite entanglement entropy along the chain, bond by bond."""
     df = _read(csv_dir, "bond_entropy.csv")
     if df is None:
         return
@@ -778,6 +789,7 @@ def plot_bond_entropy(csv_dir: Path, out_dir: Path) -> None:
 # Conditional probabilities  (how knowing v_j reshapes belief about v_i)
 # ----------------------------------------------------------------------
 def plot_conditional_probabilities(csv_dir: Path, out_dir: Path) -> None:
+    """Selected conditional distributions P(v_i | v_j) as bars."""
     df = _read(csv_dir, "conditional_probabilities.csv")
     if df is None:
         return
@@ -822,6 +834,7 @@ def plot_conditional_probabilities(csv_dir: Path, out_dir: Path) -> None:
 # Joint probabilities  (value co-occurrence lift vs independence)
 # ----------------------------------------------------------------------
 def plot_joint_probabilities(csv_dir: Path, out_dir: Path) -> None:
+    """Selected joint distributions P(v_i, v_j) as heatmaps."""
     df = _read(csv_dir, "joint_probabilities.csv")
     if df is None:
         return
@@ -862,6 +875,7 @@ def plot_joint_probabilities(csv_dir: Path, out_dir: Path) -> None:
 # Per-family feature importance  (discriminative gap vs normal)
 # ----------------------------------------------------------------------
 def plot_family_feature_importance(csv_dir: Path, out_dir: Path) -> None:
+    """Feature importance broken down per attack family, as a heatmap."""
     df = _read(csv_dir, "family_feature_importance.csv")
     if df is None:
         return
@@ -918,6 +932,15 @@ def render_figures(tables_dir: Path, graphs_dir: Path) -> None:
 # Main
 # ----------------------------------------------------------------------
 def main(data_dir: Path) -> None:
+    """Compute every explainability table, then render its figure.
+
+    Loads the trained MPS and the encoding schema, builds an
+    :class:`MPSExplainer`, and walks the analyses in turn — marginals, entropies,
+    mutual information, feature importance (overall and per family), anomaly
+    breakdown, conditional and joint probabilities. Each one writes a CSV under
+    ``explain_tables/`` and a matching PNG under ``explain_graphs/``; a failure in
+    one plot is logged and skipped so the rest still render.
+    """
     tables_dir = data_dir / "explain_tables"
     graphs_dir = data_dir / "explain_graphs"
     tables_dir.mkdir(parents=True, exist_ok=True)

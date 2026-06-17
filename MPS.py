@@ -1,3 +1,31 @@
+"""Matrix Product State core: the model itself, nothing else.
+
+This module holds the :class:`MPS` class and the handful of errors it can
+raise. Everything here is about representing the state and answering the
+questions training and scoring need: amplitudes, the norm, log-probabilities,
+NLL, plus the canonical forms and two-site surgery (merge / SVD-split /
+swap / permute) that DMRG relies on.
+
+Two things were deliberately kept *out* of this file to stop it growing into
+a god-class:
+
+* sampling lives in ``mps_generative`` (:class:`MPSSampler`),
+* reduced density matrices and information measures live in
+  ``mps_explainability`` (:class:`MPSExplainer`).
+
+Both read an ``MPS`` from the outside through its public methods and the
+``_as_matrices`` helper, so the contract between them is small on purpose.
+
+Conventions used throughout:
+
+* Sites are 0-indexed; site ``k`` carries a tensor of shape
+  ``(D_{k-1}, d_k, D_k)`` with open boundaries ``D_0 = D_N = 1``.
+* "configurations" are integer tensors of shape ``(batch, num_sites)`` where
+  column ``k`` takes values in ``[0, d_k)``.
+* Real (float32/64) and complex (complex64/128) dtypes are both supported;
+  the probability is the Born rule ``P(v) = |Psi(v)|^2 / Z``.
+"""
+
 from __future__ import annotations
 
 import logging
@@ -35,10 +63,29 @@ _DTYPE_MAP: Dict[str, torch.dtype] = {
 _REVERSE_DTYPE_MAP: Dict[torch.dtype, str] = {value: key for key, value in _DTYPE_MAP.items()}
 
 class MPS(nn.Module):
-    """
-    Matrix Product State with open boundary
+    """An open-boundary Matrix Product State used as a Born machine.
+
+    The state is a chain of ``num_sites`` rank-3 tensors. Site ``k`` has shape
+    ``(D_{k-1}, d_k, D_k)``; the outer bonds are pinned to 1, so the whole
+    contraction collapses to a scalar amplitude ``Psi(v)`` for any
+    configuration ``v``. Probabilities follow the Born rule,
+    ``P(v) = |Psi(v)|^2 / Z`` with ``Z = <Psi|Psi>``.
+
+    Physical dimensions may differ from site to site (``physical_dims`` as a
+    list), which is what lets a single chain model a row of mixed
+    NSL-KDD features, each discretised to its own number of levels.
+
+    The tensors are stored as an ``nn.ParameterList`` so the object is a normal
+    ``nn.Module`` (movable with ``.to``, saveable, etc.), but training is done by
+    DMRG sweeps rather than autograd — the trainer writes directly into
+    ``site_tensors[k].data``.
+
+    Notes on numerics: amplitudes are computed with per-site rescaling and the
+    running scale tracked in log space, so chains of dozens of sites don't
+    under/overflow. ``float64`` is the safe default for long chains.
     """
 
+    # Above this fraction of discarded SVD weight, truncations log a warning.
     _discarded_weight_warn_threshold: float = 0.1
 
     def __init__(
@@ -51,6 +98,17 @@ class MPS(nn.Module):
             *,
             _skip_init: bool = False,
     ) -> None:
+        """Build a fresh MPS.
+
+        ``physical_dims`` is either a single int (same ``d`` everywhere) or one
+        value per site. ``init_std`` controls the spread of the random Gaussian
+        initialisation; left as ``None`` it defaults to ``1/sqrt(bond_dim)``,
+        which keeps the initial amplitudes from blowing up with chain length.
+
+        ``_skip_init`` is for internal use by :meth:`load`: it allocates the
+        parameter list with zeros so the saved tensors can be copied straight
+        in, skipping the (wasted) random init.
+        """
         super().__init__()
 
         if num_sites < 2:
@@ -74,9 +132,11 @@ class MPS(nn.Module):
             self.site_tensors = self._normal_init(init_std)
 
     def _randn(self, *shape) -> torch.Tensor:
-        """
-        Generates real or complex Gaussian tensors depending on dtype.
-        Ensures E[|z|^2] = 1 for complex tensors.
+        """Gaussian noise matching ``self.dtype``.
+
+        For complex dtypes the real and imaginary parts are drawn
+        independently and scaled by ``1/sqrt(2)`` so that ``E[|z|^2] = 1``,
+        i.e. a complex entry has the same expected magnitude as a real one.
         """
         if self.dtype in (torch.complex64, torch.complex128):
             base_dtype = torch.float64 if self.dtype == torch.complex128 else torch.float32
@@ -88,6 +148,13 @@ class MPS(nn.Module):
             return torch.randn(*shape, dtype=self.dtype)
 
     def _normal_init(self, init_std: Optional[float] = None) -> nn.ParameterList:
+        """Random Gaussian site tensors with the correct boundary shapes.
+
+        The first and last tensors have a trivial outer bond (1), the bulk
+        tensors are square in their bonds. Default ``init_std`` of
+        ``1/sqrt(bond_dim)`` roughly normalises the per-site transfer so the
+        amplitude of a random state stays in a sane range.
+        """
         if init_std is None:
             init_std = 1.0 / math.sqrt(self.bond_dim)
 
@@ -106,6 +173,11 @@ class MPS(nn.Module):
         return nn.ParameterList(tensor_list)
     
     def _empty_init(self) -> nn.ParameterList:
+        """Zero-filled site tensors with the right shapes.
+
+        Used only by :meth:`load`, which immediately overwrites the data with
+        the saved tensors. Avoids paying for a random init that gets thrown away.
+        """
         tensor_list: List[nn.Parameter] = []
 
         left_tensor = torch.zeros(1, self.physical_dims[0], self.bond_dim, dtype=self.dtype)
@@ -121,6 +193,13 @@ class MPS(nn.Module):
         return nn.ParameterList(tensor_list)
     
     def _normalise_physical_dims(self, physical_dim: Union[int, Sequence[int]] = 2) -> List[int]:
+        """Turn the ``physical_dims`` argument into a per-site list.
+
+        Accepts a single int (broadcast to every site) or an explicit sequence
+        of length ``num_sites``. Every dimension must be at least 2 — a site
+        with a single level carries no information and would break the SVD
+        bookkeeping.
+        """
         if isinstance(physical_dim, int):
             if physical_dim < 2:
                 raise MPSShapeError(f"physical_dim must be >= 2, got {physical_dim}")
@@ -201,8 +280,11 @@ class MPS(nn.Module):
 
     @staticmethod
     def _as_matrices(A: torch.Tensor) -> torch.Tensor:
-        """
-        Re-index a site tensor as a stack of matrices keyed by physical value.
+        """View a site tensor ``(D_l, d, D_r)`` as ``d`` matrices ``(d, D_l, D_r)``.
+
+        Most contractions are cleaner when the physical index is on the outside:
+        slicing ``[v]`` then gives the transfer matrix for physical value ``v``.
+        This is just a ``permute`` (a view), not a copy.
         """
         return A.permute(1, 0, 2)
     
@@ -495,8 +577,12 @@ class MPS(nn.Module):
     
     @torch.no_grad()
     def normalize_state(self) -> None:
-        """
-        Rescale the MPS so that <psi|psi> = 1.
+        """Rescale every site so that ``<Psi|Psi> = 1``.
+
+        The total norm is spread evenly across sites (each tensor is multiplied
+        by ``exp(-log_z / (2N))``) rather than dumped on one of them, which keeps
+        the individual tensors well-scaled. Called after each DMRG loop to stop
+        the amplitude drifting.
         """
         log_z = self.log_norm()
         scale = torch.exp(-0.5 * log_z / self.num_sites)
@@ -513,8 +599,11 @@ class MPS(nn.Module):
         max_bond_dim: Optional[int],
         cutoff: float,
     ) -> int:
-        """
-        Determine how many singular values to keep.
+        """How many singular values survive a truncation.
+
+        Two independent caps, whichever bites first: a relative ``cutoff`` (drop
+        anything below ``cutoff * sigma_max``) and a hard ``max_bond_dim``. At
+        least one value is always kept so a bond never collapses to zero.
         """
         rank_to_keep = len(singular_values)
         if cutoff > 0:
@@ -555,7 +644,17 @@ class MPS(nn.Module):
         max_bond_dim: Optional[int] = None,
         cutoff: float = 0.0,
     ) -> Optional[List[torch.Tensor]]:
-        """
+        """Sweep left-to-right putting sites into left-canonical form.
+
+        Walks sites ``0 .. up_to-1``, factorising each one and pushing the
+        remainder onto its right neighbour, so every processed tensor becomes an
+        isometry (``A^dag A = I``). ``up_to`` defaults to the last bond, leaving
+        the chain fully left-canonical with the norm collected on the final site.
+
+        With ``truncate=False`` it uses QR (exact, no rank loss) and returns
+        ``None``. With ``truncate=True`` it uses SVD, honours ``max_bond_dim`` /
+        ``cutoff``, and returns the kept singular values per bond — which is
+        exactly what :meth:`MPSExplainer.bond_entropies` consumes.
         """
         if up_to is None:
             up_to = self.num_sites - 1
@@ -616,7 +715,16 @@ class MPS(nn.Module):
         max_bond_dim: Optional[int] = None,
         cutoff: float = 0.0,
     ) -> Optional[List[torch.Tensor]]:
-        """
+        """Sweep right-to-left putting sites into right-canonical form.
+
+        Mirror image of :meth:`left_canonicalize`: processes sites from the end
+        down to ``from_site``, leaving each as a right isometry and carrying the
+        remainder leftward. ``from_site`` defaults to 1, so the whole chain
+        (except site 0, which ends up holding the norm) becomes right-canonical.
+
+        QR when ``truncate=False`` (returns ``None``), SVD with truncation
+        otherwise (returns the kept singular values per bond, ordered from the
+        left). DMRG uses this to prime the chain before the first sweep.
         """
         if from_site is None:
             from_site = 1
@@ -672,7 +780,11 @@ class MPS(nn.Module):
     
     @torch.no_grad()
     def merge_sites(self, k: int) -> torch.Tensor:
-        """
+        """Contract sites ``k`` and ``k+1`` into one rank-4 block.
+
+        Returns ``theta`` of shape ``(D_{k-1}, d_k, d_{k+1}, D_{k+1})``. This is
+        the two-site object DMRG updates in one shot; afterwards
+        :meth:`split_and_truncate` factorises it back into two sites.
         """
         if not (0 <= k < self.num_sites - 1):
             raise MPSShapeError(f"Invalid bond index k={k}; expected 0 <= k < {self.num_sites - 1}")
@@ -694,7 +806,15 @@ class MPS(nn.Module):
         max_bond_dim: int,
         cutoff: float = 0.0,
     ) -> torch.Tensor:
-        """
+        """Split a merged two-site block back into two sites via SVD.
+
+        Inverse of :meth:`merge_sites`. SVD across the ``(D_l*d_k | d_{k+1}*D_r)``
+        cut, truncate to ``max_bond_dim`` / ``cutoff``, and absorb the singular
+        values into one side depending on ``direction``: ``"right"`` leaves site
+        ``k`` as a left-isometry and pushes the weight onto ``k+1`` (used on a
+        left-to-right sweep), ``"left"`` does the opposite. The new bond
+        dimension is whatever survived truncation, so the chain grows or shrinks
+        adaptively. Returns the kept singular values.
         """
         if not (0 <= k < self.num_sites - 1):
             raise MPSShapeError(
@@ -745,8 +865,13 @@ class MPS(nn.Module):
         max_bond_dim: Optional[int] = None,
         cutoff: float = 0.0,
     ) -> None:
-        """
-        Swap the physical indices of sites k and k+1 in place.
+        """Swap the physical indices of sites ``k`` and ``k+1`` in place.
+
+        Merges the two sites, transposes the two physical legs, and splits again,
+        so the features at those positions trade places while the state stays
+        exactly the same up to truncation. The building block for
+        :meth:`permute_sites`; with ``max_bond_dim=None`` the split keeps full
+        rank (lossless).
         """
         if not (0 <= k < self.num_sites - 1):
             raise MPSShapeError(f"Invalid bond index k={k}; expected 0 <= k < {self.num_sites - 1}")
@@ -779,8 +904,14 @@ class MPS(nn.Module):
         max_bond_dim: Optional[int] = None,
         cutoff: float = 0.0,
     ) -> None:
-        """
-        Permute the physical sites of the MPS in place.
+        """Reorder the physical sites in place to match ``permutation``.
+
+        ``permutation[k]`` is the current site that should end up at position
+        ``k``. Implemented as a bubble sort of adjacent swaps, so the cost (and
+        the entanglement the bond dimensions have to absorb) grows with how far
+        sites travel. Handy for trying feature orderings that keep strongly
+        correlated columns close together — see the mutual-information matrix in
+        the explainability module.
         """
         if sorted(permutation) != list(range(self.num_sites)):
             raise ValueError(

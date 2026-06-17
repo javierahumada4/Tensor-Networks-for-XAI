@@ -1,3 +1,26 @@
+"""DMRG training for the MPS Born machine.
+
+Fits an :class:`mps.MPS` to data by maximum likelihood using two-site DMRG: at
+each bond the two neighbouring tensors are merged, nudged down the NLL gradient,
+then split back with an SVD that also sets the new bond dimension. Sweeping
+right then left covers every bond per loop.
+
+What the trainer adds on top of the bare sweep is the bookkeeping you actually
+need to get a clean run:
+
+* an **adaptive bond cap** that only grows when truncation is genuinely losing
+  weight, so the chain doesn't balloon early;
+* **learning-rate annealing** on a plateau, with early stopping;
+* a **best-model snapshot** that is restored at the end, so a noisy late loop
+  can't undo a good fit;
+* guards for the ways MPS training goes wrong in practice — non-finite
+  gradients, dead loops, a diverging NLL — each with a clear log line.
+
+Typical use is the :func:`dmrg_train` one-liner; :class:`DMRGTrainer` is there if
+you want to drive the loop yourself. Everything runs under ``torch.no_grad`` —
+gradients are derived in closed form, not by autograd.
+"""
+
 from __future__ import annotations
 
 import dataclasses
@@ -16,7 +39,37 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class DMRGConfig:
-    """Hyperparameters for DMRG training.
+    """Everything that controls a DMRG run, with sensible defaults.
+
+    Training schedule
+        ``num_loops`` is the maximum number of full (right+left) sweeps.
+        ``num_descent_steps`` is how many gradient steps to take on each merged
+        two-site block before splitting it.
+
+    Bond-dimension growth
+        The cap starts at ``init_bond_cap`` and is allowed to climb towards
+        ``max_bond_dim``. It only grows after the cap looks *binding* for
+        ``grow_confirm_loops`` loops in a row — either a bond hit the cap or the
+        truncation threw away more than ``discarded_weight_threshold`` of the
+        weight. When it grows it multiplies by ``bond_growth_factor``.
+        ``svd_cutoff`` is the relative singular-value floor for every split.
+
+    Learning rate and stopping
+        Start at ``lr``; after ``patience`` loops with no real improvement
+        (better than ``improvement_threshold``) multiply by ``lr_shrink``. Drop
+        below ``lr_min`` and training stops. Independently,
+        ``early_stopping_patience`` (0 = off) stops if the monitored metric
+        hasn't improved for that many loops.
+
+    Minibatching
+        ``batch_size`` rows per update. ``batches_per_loop`` overrides how many
+        batches make up a loop; 0 means one pass over the data.
+
+    Bookkeeping
+        ``metric_for_stopping`` is ``"train_nll"`` or ``"val_nll"``.
+        ``abort_after_dead_loops`` bails out if every gradient is non-finite for
+        that many loops. ``seed`` makes the minibatch shuffling reproducible.
+        ``log_path`` (if set) receives one JSON record per loop.
     """
 
     num_descent_steps: int = 1
@@ -42,7 +95,18 @@ class DMRGConfig:
 
 
 class DMRGTrainer:
+    """Drives the DMRG optimisation of one :class:`mps.MPS`.
+
+    Holds the model, the :class:`DMRGConfig`, a seeded RNG for reproducible
+    shuffling and the open log file. The interesting entry point is
+    :meth:`train`; most other methods are the pieces it calls (environment
+    construction, the closed-form gradient, a single sweep, the snapshot logic).
+    The constructor validates the config up front so bad hyperparameters fail
+    immediately rather than mid-run.
+    """
+
     def __init__(self, mps: nn.Module, config: Optional[DMRGConfig] = None):
+        """Bind the model and config, validating every hyperparameter up front."""
         self.mps = mps
         self.config = config or DMRGConfig()
 
@@ -136,10 +200,17 @@ class DMRGTrainer:
         return environments
 
     def _update_left_environment(self, left_environment: torch.Tensor, site: int, configurations: torch.Tensor) -> torch.Tensor:
+        """Extend a left environment by one site instead of rebuilding it.
+
+        During a sweep the active bond moves one step at a time, so the
+        already-contracted left part only needs the new site folded in — far
+        cheaper than calling :meth:`_build_left_environments` again.
+        """
         selected_matrices = self.mps.select_matrices(site, configurations[:, site])
         return torch.bmm(left_environment.unsqueeze(1), selected_matrices).squeeze(1)
 
     def _update_right_environment(self, right_environment: torch.Tensor, site: int, configurations: torch.Tensor) -> torch.Tensor:
+        """Extend a right environment by one site (mirror of the left version)."""
         selected_matrices = self.mps.select_matrices(site, configurations[:, site])
         return torch.bmm(selected_matrices, right_environment.unsqueeze(2)).squeeze(2)
     
@@ -149,7 +220,12 @@ class DMRGTrainer:
     
     @staticmethod
     def _safe_psi(psi_v: torch.Tensor, eps: float = 1e-30) -> torch.Tensor:
-        """
+        """Nudge amplitudes away from zero without changing their phase/sign.
+
+        The gradient divides by ``Psi(v)``, so a sample the model currently
+        assigns near-zero amplitude would blow it up. This floors ``|Psi|`` at
+        ``eps`` while preserving sign (real) or phase (complex), keeping the
+        division finite instead of producing inf/NaN.
         """
         abs_psi = psi_v.abs()
         is_near_zero = abs_psi < eps
@@ -247,6 +323,18 @@ class DMRGTrainer:
         right_environments: List[torch.Tensor],
         max_bond_dim: int,
     ) -> Dict[str, Any]:
+        """One pass over every bond in a given direction.
+
+        For each bond: merge the two sites, take ``num_descent_steps`` gradient
+        steps on the merged block, split it back with truncation, then slide the
+        environment one site over so the next bond is ready. ``direction`` is
+        ``"right"`` (bonds ``0 -> N-2``) or ``"left"`` (the reverse), which also
+        decides which side the singular values land on at the split.
+
+        Non-finite gradients are skipped rather than applied. Returns a small
+        stats dict (max gradient norm, max discarded weight, counts of skipped
+        and applied updates) that the main loop aggregates and logs.
+        """
         num_sites = self.mps.num_sites
         cfg = self.config
 
@@ -365,12 +453,14 @@ class DMRGTrainer:
     # ------------------------------------------------------------------
     
     def _open_log(self) -> None:
+        """Open the JSONL log file (creating parent dirs) if a path was given."""
         if self.config.log_path is None:
             return
         Path(self.config.log_path).parent.mkdir(parents=True, exist_ok=True)
         self._log_file = open(self.config.log_path, "w", encoding="utf-8")
  
     def _close_log(self) -> None:
+        """Flush and close the log file if one is open."""
         if self._log_file is not None:
             try:
                 self._log_file.flush()
@@ -379,6 +469,7 @@ class DMRGTrainer:
                 self._log_file = None
  
     def _write_log(self, record: Dict) -> None:
+        """Append one loop record as a JSON line and flush (so a crash keeps it)."""
         if self._log_file is None:
             return
         self._log_file.write(json.dumps(record) + "\n")
@@ -394,6 +485,20 @@ class DMRGTrainer:
         train_data: torch.Tensor,
         val_data: Optional[torch.Tensor] = None,
     ) -> List[Dict[str, Any]]:
+        """Run the full optimisation and return the per-loop history.
+
+        Primes the chain (normalise + right-canonicalise), then loops:
+        right sweep, left sweep, renormalise, measure NLL, update the LR /
+        bond-cap / early-stopping state, and snapshot the model whenever the
+        monitored metric improves. The best snapshot is restored before
+        returning, so the model you get back is the best one seen, not
+        necessarily the last.
+
+        ``val_data`` is optional; if absent and ``metric_for_stopping`` was
+        ``"val_nll"`` it quietly falls back to ``"train_nll"``. The returned list
+        has one dict per loop (NLL, lr, bond dims, timings, diagnostics) and is
+        also streamed to ``config.log_path`` if set.
+        """
         cfg = self.config
         train_data, val_data = self._prepare_data(train_data, val_data)
 
@@ -639,6 +744,12 @@ class DMRGTrainer:
         train_data: torch.Tensor,
         val_data: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """Validate shapes/dtype and move the data onto the model's device.
+
+        Checks both tensors are ``(batch, num_sites)`` with the right number of
+        sites, insists on at least two training rows (a minibatch needs them),
+        and casts to ``long`` since configurations index into the site tensors.
+        """
         num_sites = self.mps.num_sites
         if train_data.dim() != 2:
             raise ValueError(

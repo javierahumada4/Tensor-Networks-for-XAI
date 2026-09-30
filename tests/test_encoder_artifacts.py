@@ -11,6 +11,8 @@ from data_artifacts import (
     prepare_one_class_artifacts,
 )
 from encoder import TabularEncoder
+from mps import MPS
+from prepare_dataset import _load_input
 
 
 def test_continuous_special_states_and_categorical_unknown_missing() -> None:
@@ -233,3 +235,41 @@ def test_persisted_bundle_roundtrip_is_exact(tmp_path) -> None:
     assert manifest["feature_names"] == created.encoder.feature_names
     assert manifest["physical_dims"] == created.encoder.physical_dims
     assert manifest["counts"]["test_anomaly"] == 6
+
+
+
+def test_persisted_bundle_can_initialize_mps_directly(tmp_path) -> None:
+    features, labels = _example_dataset()
+    root = tmp_path / "bundle"
+    prepare_one_class_artifacts(
+        features,
+        labels,
+        root,
+        normal_label=0,
+        categorical_columns=["category"],
+        n_bins=4,
+    )
+    data = load_encoded_bundle(root)
+
+    model = MPS.from_empirical_frequencies(
+        data.train.x,
+        physical_dims=data.physical_dims,
+        dtype=torch.float64,
+    )
+
+    assert model.physical_dims == data.physical_dims
+    assert model.num_sites == len(data.feature_names)
+    assert torch.isfinite(model.nll(data.val.x))
+
+
+def test_prepare_dataset_npz_loader_uses_stable_feature_names(tmp_path) -> None:
+    path = tmp_path / "toy.npz"
+    X = np.arange(20, dtype=float).reshape(10, 2)
+    y = np.array([0] * 8 + [1] * 2)
+    np.savez(path, X=X, y=y)
+
+    features, labels = _load_input(path, label_column=None)
+
+    assert features.columns.tolist() == ["x0", "x1"]
+    np.testing.assert_array_equal(features.to_numpy(), X)
+    np.testing.assert_array_equal(labels.to_numpy(), y)

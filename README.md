@@ -14,7 +14,7 @@ The current scope is deliberately small:
   one MPS site.
 - `data_artifacts.py`: reproducible one-class train/validation/test partition
   and persistent encoded artifacts.
-- `prepare_dataset.py`: CLI for CSV, Parquet, or ADBench-style NPZ inputs.
+- `prepare_dataset.py`: CLI for CSV or ADBench-style NPZ inputs.
 - The interaction-explanation implementation will be added separately rather
   than carrying over the TFG-specific explainability pipeline.
 

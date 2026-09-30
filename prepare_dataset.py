@@ -36,14 +36,6 @@ def _load_input(path: Path, label_column: Optional[str]):
         features = frame.drop(columns=[label_column])
         return features, labels
 
-    if suffix in {".parquet", ".pq"}:
-        frame = pd.read_parquet(path)
-        if label_column is None:
-            raise ValueError("--label-column is required for Parquet input")
-        labels = frame[label_column].copy()
-        features = frame.drop(columns=[label_column])
-        return features, labels
-
     if suffix == ".npz":
         payload = np.load(path, allow_pickle=False)
         if "X" not in payload or "y" not in payload:
@@ -60,7 +52,7 @@ def _load_input(path: Path, label_column: Optional[str]):
         return features, labels
 
     raise ValueError(
-        f"unsupported input format {suffix!r}; use CSV, Parquet, or NPZ"
+        f"unsupported input format {suffix!r}; use CSV or NPZ"
     )
 
 

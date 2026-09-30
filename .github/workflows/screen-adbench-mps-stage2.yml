@@ -1,15 +1,6 @@
 name: screen-adbench-mps-stage2
 
-on:
-  pull_request:
-    paths:
-      - "screen_adbench_mps_stage2.py"
-      - "screen_adbench_mps.py"
-      - "mps.py"
-      - "dmrg_trainer.py"
-      - ".github/workflows/screen-adbench-mps-stage2.yml"
-  workflow_dispatch:
-
+on:\n  workflow_dispatch:\n
 jobs:
   screen:
     runs-on: ubuntu-latest

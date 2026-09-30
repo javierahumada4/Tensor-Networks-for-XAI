@@ -1,9 +1,6 @@
 name: pilot-raw-interaction-experiments
 
 on:
-  pull_request:
-    paths:
-      - ".github/workflows/pilot-interactions.yml"
   workflow_dispatch:
 
 jobs:

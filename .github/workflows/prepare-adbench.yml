@@ -11,6 +11,14 @@ on:
       - "data_artifacts.py"
       - "requirements.txt"
       - ".github/workflows/prepare-adbench.yml"
+  pull_request:
+    paths:
+      - "prepare_adbench.py"
+      - "prepare_dataset.py"
+      - "encoder.py"
+      - "data_artifacts.py"
+      - "requirements.txt"
+      - ".github/workflows/prepare-adbench.yml"
   workflow_dispatch:
 
 jobs:

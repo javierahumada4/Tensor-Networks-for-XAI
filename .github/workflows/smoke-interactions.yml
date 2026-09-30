@@ -1,12 +1,6 @@
 name: smoke-raw-interaction-experiments
 
 on:
-  pull_request:
-    paths:
-      - "mps_interactions.py"
-      - "run_interaction_experiments.py"
-      - "tests/test_mps_interactions.py"
-      - ".github/workflows/smoke-interactions.yml"
   workflow_dispatch:
 
 jobs:

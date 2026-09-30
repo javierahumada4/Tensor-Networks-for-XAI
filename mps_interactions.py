@@ -260,12 +260,12 @@ def raw_interactions(
         for subset in itertools.combinations(range(model.num_sites), order):
             h_value = surprisals[subset]
 
-            lower_order_sum = 0.0
+            lower_order_terms = []
             for lower_order in range(1, order):
                 for proper_subset in itertools.combinations(subset, lower_order):
-                    lower_order_sum += interactions[proper_subset]
+                    lower_order_terms.append(interactions[proper_subset])
 
-            interactions[subset] = h_value - lower_order_sum
+            interactions[subset] = h_value - math.fsum(lower_order_terms)
 
     return interactions
 
@@ -295,15 +295,16 @@ def order_fidelity_curve(
             f"max_order must lie in [1, {available_max}], got {max_order}"
         )
 
-    cumulative = 0.0
+    order_sums = []
     curve = []
     for order in range(1, max_order + 1):
-        order_sum = sum(
+        order_sum = math.fsum(
             value
             for subset, value in interactions.items()
             if len(subset) == order
         )
-        cumulative += order_sum
+        order_sums.append(order_sum)
+        cumulative = math.fsum(order_sums)
         residual = score - cumulative
         curve.append({
             "order": order,
@@ -350,16 +351,10 @@ def sparsity_curve(
         "c_k": abs(score) / denominator,
     }]
 
-    positive_sum = 0.0
-    negative_sum = 0.0
-
     for k in range(1, max_k + 1):
-        if k <= len(positive):
-            positive_sum += positive[k - 1]
-        if k <= len(negative):
-            negative_sum += negative[k - 1]
-
-        reconstruction = positive_sum + negative_sum
+        positive_sum = math.fsum(positive[:k])
+        negative_sum = math.fsum(negative[:k])
+        reconstruction = math.fsum((positive_sum, negative_sum))
         residual = score - reconstruction
         curve.append({
             "k_per_sign": k,

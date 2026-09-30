@@ -1,12 +1,6 @@
 name: build-final-interaction-figures
 
 on:
-  pull_request:
-    paths:
-      - "plot_interaction_results.py"
-      - "requirements-plot.txt"
-      - "final_interactions_manifest.json"
-      - ".github/workflows/build-interaction-figures.yml"
   workflow_dispatch:
 
 jobs:

@@ -292,3 +292,109 @@ The MPS improves normal validation likelihood on all six datasets, but this does
 explicit rather than selecting hyperparameters from test anomaly labels.
 
 The exact table and evaluation provenance are versioned under `results/`.
+
+
+## Raw interaction explanation experiments
+
+The paper explanation experiments use the **raw** local interaction
+decomposition only. No entropy-centered baseline is used.
+
+For a sample `x` and non-empty feature subset `S`:
+
+```
+h_x(S) = -log p_S(x_S)
+
+I_x(S) = h_x(S) - sum_{T proper non-empty subset of S} I_x(T)
+```
+
+When every interaction order is available,
+
+```
+NLL(x) = sum_{S non-empty} I_x(S).
+```
+
+The implementation lives in `mps_interactions.py`. Marginals `p_S(x_S)` are
+computed exactly from the Born-MPS double layer; `raw_interactions()` uses
+reused prefix contractions so that all subsets up to a chosen order are not
+contracted independently from scratch. Unit tests compare these marginals
+against exhaustive enumeration on small MPS models and verify exact NLL
+reconstruction.
+
+### Experiment 1 — Explanation fidelity vs interaction order
+
+For all interactions up to order `m`,
+
+```
+A_hat_m(x) = sum_{1 <= |S| <= m} I_x(S)
+
+c_m(x) = |NLL(x) - A_hat_m(x)| / NLL(x).
+```
+
+At `m=1`, this is the direct generalization of the previous first-order
+correlation-share residual. Because raw interactions can have either sign,
+`c_m` is not required to decrease monotonically.
+
+### Experiment 2 — Explanation sparsity vs number of interactions
+
+Interactions are separated by sign and ranked by magnitude within each sign.
+At step `k`, the explanation retains the `k` largest positive interactions
+and the `k` most negative interactions. Fidelity is measured with the same
+relative NLL reconstruction residual `c_k`.
+
+The final real-data experiment uses uniform sampling without replacement from
+the labeled test anomalies, seed `123`, and at most 100 anomalies per dataset
+(all 50 anomalies for `vowels`). The maximum interaction order is fixed by a
+predeclared computational budget of at most 5,000 subsets per sample, not by
+the observed residuals.
+
+| Dataset | Samples | Features | Max order | Complete decomposition | Subsets/sample |
+|---|---:|---:|---:|---:|---:|
+| annthyroid | 100 | 6 | 6 | yes | 63 |
+| cardio | 100 | 21 | 3 | no | 1,561 |
+| cover | 100 | 10 | 10 | yes | 1,023 |
+| mammography | 100 | 6 | 6 | yes | 63 |
+| shuttle | 100 | 9 | 9 | yes | 511 |
+| vowels | 50 | 12 | 12 | yes | 4,095 |
+
+The `cardio` results are therefore explicitly **order-truncated**. Its residual
+after order 3 cannot be interpreted as evidence that higher-order interactions
+are absent.
+
+### Final interaction results
+
+The table below reports the robust "stable" threshold: the first order (or
+explanation size) after which every subsequently computed residual stays below
+the requested tolerance. This definition is used because raw signed
+interactions can temporarily worsen reconstruction through cancellation.
+
+| Dataset | Median c1 | Stable order <=10% | Stable order <=5% | Interactions <=10% | Interactions <=5% |
+|---|---:|---:|---:|---:|---:|
+| annthyroid | 0.163 | 3 | 4 | 17 | 32 |
+| cardio* | 0.068 | 3 (47/100 reached) | 3 (25/100 reached) | 100 | 250 |
+| cover | 0.244 | 3 | 4 | 22 | 35 |
+| mammography | 0.207 | 5 | 5 | 34 | 50 |
+| shuttle | 0.128 | 3 | 4 | 36 | 74 |
+| vowels | 0.017 | 2 | 8 | 73 | 272 |
+
+`cardio*` reports medians only among samples that reached the corresponding
+threshold within orders 1--3.
+
+Two behaviors are particularly important for interpretation:
+
+- low first-order residual does not imply that higher-order terms are
+  negligible. For `vowels`, median `c_1` is about 1.7%, but the residual
+  increases at intermediate orders before decreasing again;
+- explanation complexity varies materially across datasets. For example,
+  `mammography` generally needs order 5 for stable 5% reconstruction, while
+  `annthyroid` and `cover` typically need order 4.
+
+The final experiment provenance and workflow artifact hashes are stored in
+`final_interactions_manifest.json`; the compact numerical summary is in
+`results/interaction_experiments_summary.csv`.
+
+Generate paper figures from downloaded experiment outputs with:
+
+```bash
+python -m pip install -r requirements-plot.txt
+python plot_interaction_results.py outputs/interactions outputs/figures
+```

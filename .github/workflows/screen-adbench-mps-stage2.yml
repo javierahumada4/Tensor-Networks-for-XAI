@@ -1,6 +1,8 @@
 name: screen-adbench-mps-stage2
 
-on:\n  workflow_dispatch:\n
+on:
+  workflow_dispatch:
+
 jobs:
   screen:
     runs-on: ubuntu-latest

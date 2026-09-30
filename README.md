@@ -392,6 +392,17 @@ The final experiment provenance and workflow artifact hashes are stored in
 `final_interactions_manifest.json`; the compact numerical summary is in
 `results/interaction_experiments_summary.csv`.
 
+Non-monotonicity is common rather than exceptional: 88% of `annthyroid`,
+99% of `cover`, 93% of `mammography`, 85% of `shuttle`, and 100% of the
+sampled `vowels` anomalies show at least one increase in `c_m` between
+successive orders. This empirically supports the stable-threshold definition.
+The corresponding audit is stored in `results/interaction_curve_audit.csv`.
+
+For every dataset with a complete decomposition, the corrected full-order
+reconstruction closes numerically with maximum relative residual below
+`2.7e-16`. `cardio` is excluded from that closure statement because it is
+intentionally truncated at order 3.
+
 Generate paper figures from downloaded experiment outputs with:
 
 ```bash

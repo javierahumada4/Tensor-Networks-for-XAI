@@ -1,15 +1,7 @@
 name: train-final-adbench-mps
 
 on:
-  pull_request:
-    paths:
-      - "paper_mps_config.json"
-      - ".github/workflows/train-adbench-final.yml"
   workflow_dispatch:
-
-concurrency:
-  group: train-final-adbench-mps-${{ github.ref }}
-  cancel-in-progress: false
 
 jobs:
   train:

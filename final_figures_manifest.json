@@ -1,0 +1,25 @@
+{
+  "format_version": 1,
+  "workflow_run_id": 36749699314,
+  "code_commit": "745a9f79d5c9ff48f7b4a4ba8b3290b4aed3e14e",
+  "artifact_id": 11113579074,
+  "artifact_name": "final-interaction-figures",
+  "digest": "sha256:994bfc7de6c8c6806b825f37f3694834845b0e0c2905d6f8d76de452d270cf96",
+  "source_interactions_manifest": "final_interactions_manifest.json",
+  "figures": [
+    "fidelity_vs_order.png",
+    "fidelity_vs_order.pdf",
+    "fidelity_vs_order_log.png",
+    "fidelity_vs_order_log.pdf",
+    "sparsity_vs_interactions.png",
+    "sparsity_vs_interactions.pdf",
+    "sparsity_vs_interactions_log.png",
+    "sparsity_vs_interactions_log.pdf"
+  ],
+  "plotting_notes": [
+    "cardio is dashed because its interaction decomposition is truncated at order 3",
+    "linear views show IQR bands and 5%/10% residual reference lines",
+    "linear views have no upper y-limit, avoiding clipped residual excursions",
+    "log views are included to show numerical closure of complete decompositions"
+  ]
+}

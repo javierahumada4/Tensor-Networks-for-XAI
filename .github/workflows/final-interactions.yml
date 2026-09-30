@@ -1,9 +1,6 @@
 name: final-raw-interaction-experiments
 
 on:
-  pull_request:
-    paths:
-      - ".github/workflows/final-interactions.yml"
   workflow_dispatch:
 
 jobs:

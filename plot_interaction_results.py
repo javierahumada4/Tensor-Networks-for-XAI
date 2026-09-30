@@ -78,22 +78,22 @@ def plot_sparsity(results_root: Path, output_dir: Path) -> None:
     fig, ax = plt.subplots(figsize=(8, 5))
     for dataset in DATASETS:
         frame = pd.read_csv(results_root / dataset / "sparsity_summary.csv")
-        frame = frame[frame["median_num_interactions"] > 0]
+        frame = frame[frame["max_interaction_budget"] > 0]
         kwargs = line_kwargs(dataset)
         ax.plot(
-            frame["median_num_interactions"],
+            frame["max_interaction_budget"],
             frame["median_c_k"],
             label=label(dataset),
             **kwargs,
         )
         ax.fill_between(
-            frame["median_num_interactions"],
+            frame["max_interaction_budget"],
             frame["q25_c_k"],
             frame["q75_c_k"],
             alpha=0.12,
         )
     ax.set_xscale("log")
-    ax.set_xlabel("Median number of retained interactions")
+    ax.set_xlabel("Maximum retained-interaction budget (2k)")
     ax.set_ylabel("Median relative NLL reconstruction residual c_k")
     ax.set_title("Explanation sparsity vs number of interactions")
     ax.set_ylim(bottom=0.0, top=1.05)
@@ -110,13 +110,13 @@ def plot_sparsity(results_root: Path, output_dir: Path) -> None:
         residual = frame["median_c_k"].clip(lower=1e-12)
         kwargs = line_kwargs(dataset)
         ax.plot(
-            frame["median_num_interactions"],
+            frame["max_interaction_budget"],
             residual,
             label=label(dataset),
             **kwargs,
         )
     ax.set_yscale("log")
-    ax.set_xlabel("Median number of retained interactions")
+    ax.set_xlabel("Maximum retained-interaction budget (2k)")
     ax.set_ylabel("Median relative NLL reconstruction residual c_k")
     ax.set_title("Explanation sparsity vs number of interactions (log residual)")
     ax.legend()

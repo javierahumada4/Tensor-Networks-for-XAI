@@ -1,0 +1,50 @@
+{
+  "format_version": 1,
+  "workflow_run_id": 36749435575,
+  "code_commit": "95e255c137195a6e7cb727aa79618dd1b5ea583c",
+  "training_config": "paper_mps_config.json",
+  "data": {
+    "n_normal": 20000,
+    "n_anomaly": 1000,
+    "noise_probability": 0.02,
+    "seed": 123
+  },
+  "cases": {
+    "marginal": {
+      "planted_order": 1,
+      "artifact_id": 11114121290,
+      "digest": "sha256:8218b48aedb91bd702c545c81b3fff2dbca72407f466af3a13ba78b0ade5af0e",
+      "median_c_at_planted_order": 0.0018261072434984423,
+      "stable_order_5pct_median": 1,
+      "stable_order_10pct_median": 1
+    },
+    "pairwise": {
+      "planted_order": 2,
+      "artifact_id": 11113907104,
+      "digest": "sha256:221cd8d9f93c0fb0db85056cd1c6bf9a77e64f9c6f5d9b1c339a4a22e3ee9329",
+      "median_c_before_planted_order": 0.6859892630143493,
+      "median_c_at_planted_order": 0,
+      "stable_order_5pct_median": 2,
+      "stable_order_10pct_median": 2
+    },
+    "parity3": {
+      "planted_order": 3,
+      "artifact_id": 11113508629,
+      "digest": "sha256:1e0d67752c008e5e89d21b84101229f99bec57cc1af7d14ca3b9bf444788fd59",
+      "median_c_before_planted_order": 0.6053132681142852,
+      "median_c_at_planted_order": 0,
+      "stable_order_5pct_median": 3,
+      "stable_order_10pct_median": 3
+    },
+    "parity4": {
+      "planted_order": 4,
+      "artifact_id": 11114071394,
+      "digest": "sha256:010b036f3a782f9aac13ce3ef3597f68f8bd3dca250c30ef56d632fc6b0592c9",
+      "median_c_before_planted_order": 0.5346900217030733,
+      "median_c_at_planted_order": 0,
+      "stable_order_5pct_median": 4,
+      "stable_order_10pct_median": 4
+    }
+  },
+  "conclusion": "Median stable explanation order recovers planted order 1/2/3/4 at both 5% and 10% residual thresholds for all 100 sampled anomalies per case."
+}

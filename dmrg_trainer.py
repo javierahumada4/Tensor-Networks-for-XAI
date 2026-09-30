@@ -1,24 +1,13 @@
-"""DMRG training for the MPS Born machine.
+"""Two-site likelihood training for a discrete MPS Born machine.
 
-Fits an :class:`mps.MPS` to data by maximum likelihood using two-site DMRG: at
-each bond the two neighbouring tensors are merged, nudged down the NLL gradient,
-then split back with an SVD that also sets the new bond dimension. Sweeping
-right then left covers every bond per loop.
+Each update merges two neighboring tensors, takes one or more closed-form NLL
+gradient steps, and splits the block again by SVD. The maximum bond dimension
+is fixed for the entire run; local bond dimensions are selected by an SVD
+discarded-weight tolerance epsilon_trunc.
 
-What the trainer adds on top of the bare sweep is the bookkeeping you actually
-need to get a clean run:
-
-* an **adaptive bond cap** that only grows when truncation is genuinely losing
-  weight, so the chain doesn't balloon early;
-* **learning-rate annealing** on a plateau, with early stopping;
-* a **best-model snapshot** that is restored at the end, so a noisy late loop
-  can't undo a good fit;
-* guards for the ways MPS training goes wrong in practice — non-finite
-  gradients, dead loops, a diverging NLL — each with a clear log line.
-
-Typical use is the :func:`dmrg_train` one-liner; :class:`DMRGTrainer` is there if
-you want to drive the loop yourself. Everything runs under ``torch.no_grad`` —
-gradients are derived in closed form, not by autograd.
+The trainer retains learning-rate plateau reduction, early stopping, best-model
+restoration, minibatching, and numerical diagnostics. Bond-dimension growth
+phases are intentionally absent.
 """
 
 from __future__ import annotations
@@ -39,46 +28,20 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class DMRGConfig:
-    """Everything that controls a DMRG run, with sensible defaults.
+    """Configuration for two-site maximum-likelihood training.
 
-    Training schedule
-        ``num_loops`` is the maximum number of full (right+left) sweeps.
-        ``num_descent_steps`` is how many gradient steps to take on each merged
-        two-site block before splitting it.
+    max_bond_dim is a fixed hard cap throughout the run. epsilon_trunc is the
+    maximum target discarded SVD weight at each two-site split. The local rank
+    is the smallest rank satisfying that tolerance unless the hard cap is
+    reached first.
 
-    Bond-dimension growth
-        The cap starts at ``init_bond_cap`` and is allowed to climb towards
-        ``max_bond_dim``. It only grows after the cap looks *binding* for
-        ``grow_confirm_loops`` loops in a row — either a bond hit the cap or the
-        truncation threw away more than ``discarded_weight_threshold`` of the
-        weight. When it grows it multiplies by ``bond_growth_factor``.
-        ``svd_cutoff`` is the relative singular-value floor for every split.
-
-    Learning rate and stopping
-        Start at ``lr``; after ``patience`` loops with no real improvement
-        (better than ``improvement_threshold``) multiply by ``lr_shrink``. Drop
-        below ``lr_min`` and training stops. Independently,
-        ``early_stopping_patience`` (0 = off) stops if the monitored metric
-        hasn't improved for that many loops.
-
-    Minibatching
-        ``batch_size`` rows per update. ``batches_per_loop`` overrides how many
-        batches make up a loop; 0 means one pass over the data.
-
-    Bookkeeping
-        ``metric_for_stopping`` is ``"train_nll"`` or ``"val_nll"``.
-        ``abort_after_dead_loops`` bails out if every gradient is non-finite for
-        that many loops. ``seed`` makes the minibatch shuffling reproducible.
-        ``log_path`` (if set) receives one JSON record per loop.
+    Learning-rate annealing and early stopping are retained independently of
+    model capacity. metric_for_stopping may be "train_nll" or "val_nll".
     """
 
     num_descent_steps: int = 1
     max_bond_dim: int = 100
-    init_bond_cap: int = 4
-    bond_growth_factor: float = 2.0
-    discarded_weight_threshold: float = 1e-4
-    grow_confirm_loops: int = 4
-    svd_cutoff: float = 1e-8
+    epsilon_trunc: float = 1e-6
     lr: float = 0.01
     num_loops: int = 20
     batch_size: int = 256
@@ -95,7 +58,7 @@ class DMRGConfig:
 
 
 class DMRGTrainer:
-    """Drives the DMRG optimisation of one :class:`mps.MPS`.
+    """Drives two-site maximum-likelihood optimisation of one :class:`mps.MPS`.
 
     Holds the model, the :class:`DMRGConfig`, a seeded RNG for reproducible
     shuffling and the open log file. The interesting entry point is
@@ -119,20 +82,10 @@ class DMRGTrainer:
             raise ValueError(
                 f"max_bond_dim must be >= 1, got {self.config.max_bond_dim}"
             )
-        if self.config.init_bond_cap < 1:
+        if not (0.0 <= self.config.epsilon_trunc < 1.0):
             raise ValueError(
-                f"init_bond_cap must be >= 1, got {self.config.init_bond_cap}"
-            )
-        if self.config.bond_growth_factor <= 1.0:
-            raise ValueError(
-                "bond_growth_factor must be > 1.0 (set init_bond_cap == "
-                "max_bond_dim to disable growth); got "
-                f"{self.config.bond_growth_factor}"
-            )
-        if self.config.discarded_weight_threshold < 0.0:
-            raise ValueError(
-                "discarded_weight_threshold must be >= 0, got "
-                f"{self.config.discarded_weight_threshold}"
+                "epsilon_trunc must satisfy 0 <= epsilon_trunc < 1, got "
+                f"{self.config.epsilon_trunc}"
             )
         if self.config.early_stopping_patience < 0:
             raise ValueError(
@@ -143,11 +96,6 @@ class DMRGTrainer:
             raise ValueError(
                 f"abort_after_dead_loops must be >= 0, got "
                 f"{self.config.abort_after_dead_loops}"
-            )
-        if self.config.grow_confirm_loops < 1:
-            raise ValueError(
-                f"grow_confirm_loops must be >= 1, got "
-                f"{self.config.grow_confirm_loops}"
             )
         
         try:
@@ -321,7 +269,6 @@ class DMRGTrainer:
         lr: float,
         left_environments: List[torch.Tensor],
         right_environments: List[torch.Tensor],
-        max_bond_dim: int,
     ) -> Dict[str, Any]:
         """One pass over every bond in a given direction.
 
@@ -371,7 +318,11 @@ class DMRGTrainer:
 
             if was_updated:
                 kept_singular_values = self.mps.split_and_truncate(
-                    k, merged_tensor, direction, max_bond_dim, cfg.svd_cutoff
+                    k,
+                    merged_tensor,
+                    direction,
+                    cfg.max_bond_dim,
+                    cfg.epsilon_trunc,
                 )
                 total_weight = merged_tensor.norm().pow(2)
                 kept_weight = kept_singular_values.square().sum()
@@ -431,24 +382,6 @@ class DMRGTrainer:
             ).clone()
 
     # ------------------------------------------------------------------
-    #  Dynamic bond-dim cap
-    # ------------------------------------------------------------------
-    
-    def _cap_is_binding(self, cap: int, discarded_weight: float) -> Optional[str]:
-        """Whether the truncation cap limited the model this loop.
-
-        Returns a short human-readable reason, or None if the cap is not
-        binding.  The cap is binding when either a bond actually reached
-        the cap (the SVD wanted more rank) or the truncation discarded a
-        non-negligible amount of weight.
-        """
-        if self.mps.bond_dims and max(self.mps.bond_dims) >= cap:
-            return "a bond reached the cap"
-        if discarded_weight > self.config.discarded_weight_threshold:
-            return f"discarded weight {discarded_weight:.2e} over threshold"
-        return None
-    
-    # ------------------------------------------------------------------
     #  Logging
     # ------------------------------------------------------------------
     
@@ -489,7 +422,7 @@ class DMRGTrainer:
 
         Primes the chain (normalise + right-canonicalise), then loops:
         right sweep, left sweep, renormalise, measure NLL, update the LR /
-        bond-cap / early-stopping state, and snapshot the model whenever the
+        early-stopping state, and snapshot the model whenever the
         monitored metric improves. The best snapshot is restored before
         returning, so the model you get back is the best one seen, not
         necessarily the last.
@@ -521,8 +454,6 @@ class DMRGTrainer:
         best_loop = -1
         best_snapshot: Optional[List[torch.Tensor]] = None
         loops_since_best = 0
-        bond_cap = min(cfg.init_bond_cap, cfg.max_bond_dim)
-        binding_streak = 0
 
         history: List[Dict] = []
         consecutive_dead_loops = 0
@@ -543,7 +474,6 @@ class DMRGTrainer:
             for loop in range(loop_start, cfg.num_loops):
                 last_loop = loop
                 t_loop_start = time.monotonic()
-                max_bond_dim = bond_cap
 
                 permutation = self._randperm_like(len(train_data), train_data.device)
                 loop_max_gradient_norm = 0.0
@@ -565,11 +495,15 @@ class DMRGTrainer:
 
                     left_environments = self._build_left_environments(batch)
                     right_environments = self._build_right_environments(batch)
-                    stats_right_sweep = self._sweep(batch, "right", lr,left_environments, right_environments, max_bond_dim)
+                    stats_right_sweep = self._sweep(
+                        batch, "right", lr, left_environments, right_environments
+                    )
 
                     left_environments = self._build_left_environments(batch)
                     right_environments = self._build_right_environments(batch)
-                    stats_left_sweep = self._sweep(batch, "left", lr, left_environments, right_environments, max_bond_dim)
+                    stats_left_sweep = self._sweep(
+                        batch, "left", lr, left_environments, right_environments
+                    )
 
                     loop_max_gradient_norm = max(loop_max_gradient_norm, stats_right_sweep["max_gradient_norm"], stats_left_sweep["max_gradient_norm"])
                     loop_max_discarded_weight = max(loop_max_discarded_weight, stats_right_sweep["max_discarded_weight"], stats_left_sweep["max_discarded_weight"])
@@ -597,7 +531,8 @@ class DMRGTrainer:
                     "train_nll": train_nll,
                     "lr": lr,
                     "bond_dims": list(self.mps.bond_dims),
-                    "max_bond_dim_cap": max_bond_dim,
+                    "max_bond_dim": cfg.max_bond_dim,
+                    "epsilon_trunc": cfg.epsilon_trunc,
                     "max_gradient_norm": loop_max_gradient_norm,
                     "max_discarded_weight": loop_max_discarded_weight,
                     "num_skipped_nan": num_skipped_nan,
@@ -632,7 +567,8 @@ class DMRGTrainer:
                 log_parts.append(f"lr={lr:.2e}")
                 log_parts.append(f"disc_w={loop_max_discarded_weight:.2e}")
                 log_parts.append(f"|grad|={loop_max_gradient_norm:.2e}")
-                log_parts.append(f"cap={bond_cap}/{cfg.max_bond_dim}")
+                log_parts.append(f"Dmax={cfg.max_bond_dim}")
+                log_parts.append(f"eps_trunc={cfg.epsilon_trunc:.1e}")
                 log_parts.append(f"bond_dims={list(self.mps.bond_dims)}")
                 logger.info("  ".join(log_parts))
 
@@ -643,8 +579,7 @@ class DMRGTrainer:
                         loop, train_nll,
                     )
                     break
-    
-                monitor_value = record.get(metric, train_nll)
+
                 if improved:
                     best_metric = monitored
                     best_loop = loop
@@ -671,30 +606,6 @@ class DMRGTrainer:
                             metric, loops_since_best, best_metric, best_loop,
                         )
                         break
-
-                if bond_cap < cfg.max_bond_dim:
-                    cap_reason = self._cap_is_binding(
-                        bond_cap, loop_max_discarded_weight
-                    )
-                    binding_streak = (
-                        binding_streak + 1 if cap_reason is not None else 0
-                    )
-                    if binding_streak >= cfg.grow_confirm_loops:
-                        new_cap = min(
-                            cfg.max_bond_dim,
-                            math.ceil(bond_cap * cfg.bond_growth_factor),
-                        )
-                        if new_cap > bond_cap:
-                            logger.info(
-                                "loop %d: bond cap %d -> %d (%s, "
-                                "binding %d loop(s)).",
-                                loop, bond_cap, new_cap, cap_reason,
-                                binding_streak,
-                            )
-                            bond_cap = new_cap
-                            binding_streak = 0
-                else:
-                    binding_streak = 0
 
                 if num_updates == 0:
                     consecutive_dead_loops += 1
@@ -808,8 +719,17 @@ def dmrg_train(
         from mps import MPS
         from dmrg_trainer import dmrg_train
 
-        model = MPS(num_sites=30, bond_dim=2, physical_dim=2)
-        history = dmrg_train(model, train_data, max_bond_dim=60, num_loops=40)
+        model = MPS.from_empirical_frequencies(
+            train_data, physical_dims=physical_dims
+        )
+        history = dmrg_train(
+            model,
+            train_data,
+            val_data,
+            max_bond_dim=64,
+            epsilon_trunc=1e-6,
+            num_loops=40,
+        )
     """
     if config is None:
         config = DMRGConfig(**kwargs)

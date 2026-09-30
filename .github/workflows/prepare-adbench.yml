@@ -1,6 +1,8 @@
 name: prepare-adbench-artifacts
 
-on:\n  workflow_dispatch:\n
+on:
+  workflow_dispatch:
+
 jobs:
   prepare:
     runs-on: ubuntu-latest

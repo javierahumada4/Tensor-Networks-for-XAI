@@ -1,17 +1,6 @@
 name: screen-adbench-mps
 
-on:
-  pull_request:
-    paths:
-      - "screen_adbench_mps.py"
-      - "mps.py"
-      - "dmrg_trainer.py"
-      - "encoder.py"
-      - "data_artifacts.py"
-      - "prepare_adbench.py"
-      - ".github/workflows/screen-adbench-mps.yml"
-  workflow_dispatch:
-
+on:\n  workflow_dispatch:\n
 jobs:
   screen:
     runs-on: ubuntu-latest

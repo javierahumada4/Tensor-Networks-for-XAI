@@ -41,6 +41,55 @@ def _canonical_subset(sites: Iterable[int], num_sites: int) -> Subset:
     return subset
 
 
+def _prepare_configuration(model: MPS, configuration: torch.Tensor) -> torch.Tensor:
+    if configuration.dim() != 1:
+        raise MPSShapeError(
+            "configuration must be 1-D with shape (num_sites,), "
+            f"got {tuple(configuration.shape)}"
+        )
+    if len(configuration) != model.num_sites:
+        raise MPSShapeError(
+            f"expected {model.num_sites} sites, got {len(configuration)}"
+        )
+    device = model.site_tensors[0].device
+    configuration = configuration.to(device=device, dtype=torch.long)
+    model._validate_configurations(configuration.unsqueeze(0))
+    return configuration
+
+
+def _advance_transfer(
+    model: MPS,
+    env: torch.Tensor,
+    log_scale: torch.Tensor,
+    tensor: torch.Tensor,
+    *,
+    fixed_value: Optional[int],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Advance one site in the double-layer probability contraction."""
+    if fixed_value is None:
+        matrices = model._as_matrices(tensor)
+        contracted = torch.matmul(env, matrices)
+        matrices_dagger = matrices.conj().transpose(1, 2)
+        next_env = torch.matmul(matrices_dagger, contracted).sum(dim=0)
+    else:
+        matrix = tensor[:, fixed_value, :]
+        next_env = matrix.conj().transpose(0, 1) @ env @ matrix
+
+    scale = next_env.abs().max().clamp_min(model._numerical_floor)
+    next_env = next_env / scale
+    next_log_scale = log_scale + scale.double().log()
+    return next_env, next_log_scale
+
+
+def _log_scalar_contraction(
+    model: MPS,
+    env: torch.Tensor,
+    log_scale: torch.Tensor,
+) -> torch.Tensor:
+    value = env.squeeze().real.clamp_min(model._numerical_floor)
+    return value.double().log() + log_scale
+
+
 @torch.no_grad()
 def subset_log_prob(
     model: MPS,
@@ -57,45 +106,43 @@ def subset_log_prob(
 
     The empty subset has probability one and therefore log probability zero.
     """
-    if configuration.dim() != 1:
-        raise MPSShapeError(
-            "configuration must be 1-D with shape (num_sites,), "
-            f"got {tuple(configuration.shape)}"
-        )
-    if len(configuration) != model.num_sites:
-        raise MPSShapeError(
-            f"expected {model.num_sites} sites, got {len(configuration)}"
-        )
-
-    device = model.site_tensors[0].device
-    configuration = configuration.to(device=device, dtype=torch.long)
-    model._validate_configurations(configuration.unsqueeze(0))
-
+    configuration = _prepare_configuration(model, configuration)
     subset = _canonical_subset(sites, model.num_sites)
     if not subset:
-        return torch.zeros((), dtype=torch.float64, device=device)
+        return torch.zeros(
+            (),
+            dtype=torch.float64,
+            device=model.site_tensors[0].device,
+        )
 
     selected = set(subset)
-    env = torch.ones(1, 1, dtype=model.dtype, device=device)
-    log_scale = torch.zeros((), dtype=torch.float64, device=device)
+    env = torch.ones(
+        1,
+        1,
+        dtype=model.dtype,
+        device=model.site_tensors[0].device,
+    )
+    log_scale = torch.zeros(
+        (),
+        dtype=torch.float64,
+        device=env.device,
+    )
 
     for site, tensor in enumerate(model.site_tensors):
-        if site in selected:
-            value = int(configuration[site].item())
-            matrix = tensor[:, value, :]
-            env = matrix.conj().transpose(0, 1) @ env @ matrix
-        else:
-            matrices = model._as_matrices(tensor)
-            contracted = torch.matmul(env, matrices)
-            matrices_dagger = matrices.conj().transpose(1, 2)
-            env = torch.matmul(matrices_dagger, contracted).sum(dim=0)
+        fixed_value = (
+            int(configuration[site].item())
+            if site in selected
+            else None
+        )
+        env, log_scale = _advance_transfer(
+            model,
+            env,
+            log_scale,
+            tensor,
+            fixed_value=fixed_value,
+        )
 
-        scale = env.abs().max().clamp_min(model._numerical_floor)
-        env = env / scale
-        log_scale = log_scale + scale.double().log()
-
-    numerator = env.squeeze().real.clamp_min(model._numerical_floor)
-    log_numerator = numerator.double().log() + log_scale
+    log_numerator = _log_scalar_contraction(model, env, log_scale)
     if log_z is None:
         log_z = model.log_norm()
     return log_numerator - log_z.double()
@@ -119,6 +166,71 @@ def subset_surprisal(
 
 
 @torch.no_grad()
+def subset_surprisals_up_to_order(
+    model: MPS,
+    configuration: torch.Tensor,
+    *,
+    max_order: int,
+) -> Dict[Subset, float]:
+    """Compute every h_x(S) up to max_order in one branched chain pass.
+
+    Each prefix contraction is reused by its marginalized and fixed-value child
+    branches. This avoids contracting the whole MPS independently for every
+    subset and is substantially faster for the paper experiments.
+    """
+    configuration = _prepare_configuration(model, configuration)
+    if max_order < 1 or max_order > model.num_sites:
+        raise ValueError(
+            f"max_order must lie in [1, {model.num_sites}], got {max_order}"
+        )
+
+    device = model.site_tensors[0].device
+    states: Dict[Subset, tuple[torch.Tensor, torch.Tensor]] = {
+        (): (
+            torch.ones(1, 1, dtype=model.dtype, device=device),
+            torch.zeros((), dtype=torch.float64, device=device),
+        )
+    }
+
+    for site, tensor in enumerate(model.site_tensors):
+        next_states: Dict[Subset, tuple[torch.Tensor, torch.Tensor]] = {}
+        fixed_value = int(configuration[site].item())
+
+        for subset, (env, log_scale) in states.items():
+            marginal_env, marginal_scale = _advance_transfer(
+                model,
+                env,
+                log_scale,
+                tensor,
+                fixed_value=None,
+            )
+            next_states[subset] = (marginal_env, marginal_scale)
+
+            if len(subset) < max_order:
+                fixed_env, fixed_scale = _advance_transfer(
+                    model,
+                    env,
+                    log_scale,
+                    tensor,
+                    fixed_value=fixed_value,
+                )
+                next_states[subset + (site,)] = (fixed_env, fixed_scale)
+
+        states = next_states
+
+    log_z = model.log_norm().double()
+    surprisals: Dict[Subset, float] = {}
+
+    for subset, (env, log_scale) in states.items():
+        if not subset:
+            continue
+        log_numerator = _log_scalar_contraction(model, env, log_scale)
+        surprisals[subset] = float((log_z - log_numerator).item())
+
+    return surprisals
+
+
+@torch.no_grad()
 def raw_interactions(
     model: MPS,
     configuration: torch.Tensor,
@@ -130,11 +242,6 @@ def raw_interactions(
     Results are returned in increasing interaction order. max_order=None
     computes the complete decomposition through order model.num_sites.
     """
-    if configuration.dim() != 1:
-        raise MPSShapeError(
-            "configuration must be 1-D with shape (num_sites,), "
-            f"got {tuple(configuration.shape)}"
-        )
     if max_order is None:
         max_order = model.num_sites
     if max_order < 1 or max_order > model.num_sites:
@@ -142,19 +249,16 @@ def raw_interactions(
             f"max_order must lie in [1, {model.num_sites}], got {max_order}"
         )
 
-    log_z = model.log_norm()
+    surprisals = subset_surprisals_up_to_order(
+        model,
+        configuration,
+        max_order=max_order,
+    )
     interactions: Dict[Subset, float] = {}
 
     for order in range(1, max_order + 1):
         for subset in itertools.combinations(range(model.num_sites), order):
-            h_value = float(
-                subset_surprisal(
-                    model,
-                    configuration,
-                    subset,
-                    log_z=log_z,
-                ).item()
-            )
+            h_value = surprisals[subset]
 
             lower_order_sum = 0.0
             for lower_order in range(1, order):

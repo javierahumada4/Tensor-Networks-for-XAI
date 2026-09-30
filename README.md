@@ -233,3 +233,62 @@ creates the persistent train/validation/test bundles, and writes
 The workflow `.github/workflows/prepare-adbench.yml` runs the same pipeline,
 validates every generated bundle, and publishes
 `adbench-encoded-seed123-bins8` as a CI artifact.
+
+
+## Frozen final MPS configuration
+
+Hyperparameter selection was performed using **normal validation NLL only**.
+Test anomaly labels were not used to select the model.
+
+The final common configuration is stored in `paper_mps_config.json`:
+
+- `max_bond_dim = 16`
+- `epsilon_trunc = 0`
+- initial learning rate `2e-3`
+- batch size `1024`
+- maximum 30 full-data loops
+- learning-rate patience `5`, shrink factor `0.5`
+- early-stopping patience `10`
+- seed `123`
+
+The final confirmation explicitly compared the strongest positive-tolerance
+configurations against matched `epsilon_trunc=0` variants. The selected
+configuration minimized mean relative normal-validation-NLL regret across the
+six datasets.
+
+`epsilon_trunc=0` means that the discarded-weight truncation machinery remains
+implemented and tested, but the selected final model does not truncate by a
+positive discarded-weight tolerance; local ranks are limited by the fixed
+`max_bond_dim=16` cap.
+
+The six final training artifacts were produced by workflow run
+`36734660642`. Their artifact IDs and SHA-256 digests are recorded in
+`final_training_manifest.json`.
+
+## Frozen detection results
+
+Threshold-free test evaluation is implemented in
+`evaluate_adbench_final.py`. The required baseline is the independent
+empirical-marginal model used to initialize the MPS.
+
+| Dataset | MPS AUROC | Independent AUROC | MPS AUPRC | Independent AUPRC |
+|---|---:|---:|---:|---:|
+| annthyroid | 0.490 | 0.630 | 0.388 | 0.456 |
+| cardio | 0.891 | 0.892 | 0.897 | 0.902 |
+| cover | 0.543 | 0.619 | 0.337 | 0.324 |
+| mammography | 0.848 | 0.871 | 0.562 | 0.577 |
+| shuttle | 0.995 | 0.991 | 0.994 | 0.988 |
+| vowels | 0.778 | 0.538 | 0.388 | 0.222 |
+
+Macro averages:
+
+- MPS AUROC: `0.7574`
+- independent AUROC: `0.7568`
+- MPS AUPRC: `0.5942`
+- independent AUPRC: `0.5782`
+
+The MPS improves normal validation likelihood on all six datasets, but this does
+**not** translate into uniformly better anomaly ranking. This baseline is kept
+explicit rather than selecting hyperparameters from test anomaly labels.
+
+The exact table and evaluation provenance are versioned under `results/`.

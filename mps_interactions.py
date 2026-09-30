@@ -114,6 +114,8 @@ def subset_log_prob(
             dtype=torch.float64,
             device=model.site_tensors[0].device,
         )
+    if len(subset) == model.num_sites:
+        return model.log_prob(configuration.unsqueeze(0))[0].double()
 
     selected = set(subset)
     env = torch.ones(
@@ -226,6 +228,12 @@ def subset_surprisals_up_to_order(
             continue
         log_numerator = _log_scalar_contraction(model, env, log_scale)
         surprisals[subset] = float((log_z - log_numerator).item())
+
+    if max_order == model.num_sites:
+        full_subset = tuple(range(model.num_sites))
+        surprisals[full_subset] = float(
+            model.anomaly_score(configuration.unsqueeze(0))[0].item()
+        )
 
     return surprisals
 

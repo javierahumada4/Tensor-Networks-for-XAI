@@ -1,13 +1,6 @@
 name: validate-synthetic-interaction-order
 
 on:
-  pull_request:
-    paths:
-      - "prepare_synthetic.py"
-      - "tests/test_synthetic.py"
-      - "mps_interactions.py"
-      - "run_interaction_experiments.py"
-      - ".github/workflows/validate-synthetic-interactions.yml"
   workflow_dispatch:
 
 jobs:

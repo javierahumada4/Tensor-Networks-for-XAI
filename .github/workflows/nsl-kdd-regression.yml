@@ -1,0 +1,133 @@
+name: nsl-kdd-regression
+
+on:
+  pull_request:
+    paths:
+      - "regress_nsl_kdd.py"
+      - ".github/workflows/nsl-kdd-regression.yml"
+  workflow_dispatch:
+
+env:
+  NSL_KDD_COMMIT: "0804644cbc0a8af940ac8d9da4a90889f61b4d57"
+  NSL_KDD_BASE: "https://raw.githubusercontent.com/mwinton/NSL-KDD-Data-Set/0804644cbc0a8af940ac8d9da4a90889f61b4d57"
+
+jobs:
+  tfg-control:
+    name: TFG original control
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --index-url https://download.pytorch.org/whl/cpu torch
+          python -m pip install "numpy>=1.26" "pandas>=2.0" "scikit-learn>=1.4" "matplotlib>=3.8"
+
+      - name: Download pinned NSL-KDD
+        run: |
+          mkdir -p nsl_kdd
+          curl -fL "$NSL_KDD_BASE/KDDTrain%2B.txt" -o nsl_kdd/KDDTrain+.txt
+          curl -fL "$NSL_KDD_BASE/KDDTest%2B.txt" -o nsl_kdd/KDDTest+.txt
+          sha256sum nsl_kdd/KDDTrain+.txt nsl_kdd/KDDTest+.txt
+          wc -l nsl_kdd/KDDTrain+.txt nsl_kdd/KDDTest+.txt
+
+      - name: Encode with original TFG encoder
+        run: python encoder_nsl_kdd.py nsl_kdd
+
+      - name: Train original TFG model
+        run: python train_mps_nsl_kdd.py nsl_kdd
+
+      - name: Evaluate original TFG model
+        run: python evaluate_mps_nsl_kdd.py nsl_kdd
+
+      - name: Record control provenance
+        run: |
+          python - <<'PY'
+          import json, subprocess
+          from pathlib import Path
+          report=json.loads(Path("nsl_kdd/eval_report.json").read_text())
+          out={
+              "implementation":"TFG-original-main",
+              "code_commit":subprocess.check_output(["git","rev-parse","HEAD"],text=True).strip(),
+              "dataset_commit":"0804644cbc0a8af940ac8d9da4a90889f61b4d57",
+              "global_metrics":report["global_metrics"],
+              "metrics_per_threshold":report["metrics_per_threshold"],
+              "per_family":report["per_family"],
+              "model":report["model"],
+          }
+          Path("nsl_kdd/control_summary.json").write_text(json.dumps(out,indent=2))
+          print(json.dumps(out,indent=2))
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nsl-kdd-tfg-original-control
+          path: |
+            nsl_kdd/control_summary.json
+            nsl_kdd/eval_report.json
+            nsl_kdd/train_history.json
+            nsl_kdd/encoding_schema.json
+          if-no-files-found: error
+          retention-days: 90
+
+  refactored:
+    name: Refactored trainer (${{ matrix.variant }})
+    strategy:
+      fail-fast: false
+      matrix:
+        variant:
+          - paper
+          - d64_tfgscale
+
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --index-url https://download.pytorch.org/whl/cpu torch
+          python -m pip install "numpy>=1.26" "pandas>=2.0" "scikit-learn>=1.4"
+
+      - name: Download pinned NSL-KDD
+        run: |
+          mkdir -p nsl_kdd
+          curl -fL "$NSL_KDD_BASE/KDDTrain%2B.txt" -o nsl_kdd/KDDTrain+.txt
+          curl -fL "$NSL_KDD_BASE/KDDTest%2B.txt" -o nsl_kdd/KDDTest+.txt
+          sha256sum nsl_kdd/KDDTrain+.txt nsl_kdd/KDDTest+.txt
+          wc -l nsl_kdd/KDDTrain+.txt nsl_kdd/KDDTest+.txt
+
+      - name: Materialize exact TFG encoder from main
+        run: |
+          git fetch origin main:refs/remotes/origin/main
+          git show origin/main:encoder_nsl_kdd.py > /tmp/encoder_nsl_kdd.py
+          python /tmp/encoder_nsl_kdd.py nsl_kdd
+
+      - name: Train and evaluate refactored MPS
+        run: |
+          python regress_nsl_kdd.py \
+            nsl_kdd \
+            "outputs/${{ matrix.variant }}" \
+            --variant "${{ matrix.variant }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nsl-kdd-refactored-${{ matrix.variant }}
+          path: outputs/${{ matrix.variant }}
+          if-no-files-found: error
+          retention-days: 90

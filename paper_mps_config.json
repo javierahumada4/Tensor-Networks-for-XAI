@@ -1,0 +1,51 @@
+{
+  "format_version": 1,
+  "status": "frozen_for_final_training",
+  "max_bond_dim": 16,
+  "epsilon_trunc": 0,
+  "lr": 0.002,
+  "selection": {
+    "criterion": "minimize mean relative normal-validation NLL regret; then worst-dataset regret; then dataset wins; then runtime",
+    "mean_relative_regret": 0.009196160717857704,
+    "max_relative_regret": 0.040552178057968055,
+    "mean_relative_val_improvement": 0.18737901107933336,
+    "datasets_won": 2,
+    "compared_candidates": [
+      "D16_e6_lr2e-3",
+      "D16_e0_lr2e-3",
+      "D32_e6_lr8e-4",
+      "D32_e0_lr8e-4"
+    ],
+    "confirmation": {
+      "workflow_run_id": 36732838522,
+      "artifact_id": 11106995187,
+      "artifact_sha256": "6b11f4a59dda5c3ddb1c6af3a97f5603733bd6aa9e4cdbe3b3a307ae492e47d3",
+      "code_commit": "99556e316971903390a05fe52891a42b7fd9cda6"
+    }
+  },
+  "final_training": {
+    "batch_size": 1024,
+    "max_loops": 30,
+    "lr_patience": 5,
+    "lr_shrink": 0.5,
+    "lr_min": 0.00001,
+    "early_stopping_patience": 10,
+    "seed": 123,
+    "batches_per_loop": 0,
+    "metric_for_stopping": "val_nll"
+  },
+  "data": {
+    "benchmark": "ADBench",
+    "source_commit": "3dac8221081e190f157d78e93bfa8867f90d0965",
+    "encoder_bins": 8,
+    "split_seed": 123,
+    "datasets": [
+      "annthyroid",
+      "cardio",
+      "cover",
+      "mammography",
+      "shuttle",
+      "vowels"
+    ]
+  }
+}

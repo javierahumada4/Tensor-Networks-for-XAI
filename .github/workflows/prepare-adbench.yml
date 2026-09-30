@@ -1,26 +1,6 @@
 name: prepare-adbench-artifacts
 
-on:
-  push:
-    branches:
-      - paper-mps-clean
-    paths:
-      - "prepare_adbench.py"
-      - "prepare_dataset.py"
-      - "encoder.py"
-      - "data_artifacts.py"
-      - "requirements.txt"
-      - ".github/workflows/prepare-adbench.yml"
-  pull_request:
-    paths:
-      - "prepare_adbench.py"
-      - "prepare_dataset.py"
-      - "encoder.py"
-      - "data_artifacts.py"
-      - "requirements.txt"
-      - ".github/workflows/prepare-adbench.yml"
-  workflow_dispatch:
-
+on:\n  workflow_dispatch:\n
 jobs:
   prepare:
     runs-on: ubuntu-latest

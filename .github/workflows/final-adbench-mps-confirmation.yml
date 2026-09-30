@@ -1,13 +1,6 @@
 name: final-adbench-mps-hyperparameter-confirmation
 
 on:
-  pull_request:
-    paths:
-      - "confirm_adbench_mps_final.py"
-      - "screen_adbench_mps.py"
-      - "mps.py"
-      - "dmrg_trainer.py"
-      - ".github/workflows/final-adbench-mps-confirmation.yml"
   workflow_dispatch:
 
 jobs:

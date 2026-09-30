@@ -1,11 +1,6 @@
 name: evaluate-final-adbench-mps
 
 on:
-  pull_request:
-    paths:
-      - "evaluate_adbench_final.py"
-      - "final_training_manifest.json"
-      - ".github/workflows/evaluate-final-adbench.yml"
   workflow_dispatch:
 
 jobs:

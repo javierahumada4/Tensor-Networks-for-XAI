@@ -10,3 +10,4 @@ venv/
 logs/
 outputs/
 .DS_Store
+artifacts/\ndata/\n

@@ -6,8 +6,6 @@ on:
       - paper-mps-clean
     paths:
       - "paper_mps_config.json"
-      - "train_adbench_final.py"
-      - ".github/workflows/train-adbench-final.yml"
   workflow_dispatch:
 
 concurrency:

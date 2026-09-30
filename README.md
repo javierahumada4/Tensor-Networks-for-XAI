@@ -194,3 +194,42 @@ feature_names = data.feature_names
 
 This guarantees that training, evaluation, and explanation scripts consume the
 same encoded variables and the same train/validation/test partition.
+
+
+## Paper real-data suite: ADBench
+
+The current real-data suite is pinned to ADBench commit
+`3dac8221081e190f157d78e93bfa8867f90d0965` and contains:
+
+| Dataset | Rows | Features | Anomalies |
+|---|---:|---:|---:|
+| annthyroid | 7,200 | 6 | 534 |
+| cardio | 1,831 | 21 | 176 |
+| cover | 286,048 | 10 | 2,747 |
+| mammography | 11,183 | 6 | 260 |
+| shuttle | 49,097 | 9 | 3,511 |
+| vowels | 1,456 | 12 | 50 |
+
+All six use the same preparation configuration:
+
+- seed: `123`
+- continuous quantile bins: `8`
+- normal train fraction: `0.70`
+- normal validation fraction: `0.15`
+- remaining normals: test
+- all anomalies: test only
+- normal label: `0`
+
+Generate the entire suite with:
+
+```bash
+python prepare_adbench.py artifacts/adbench
+```
+
+The script downloads the exact pinned source files, records SHA-256 hashes,
+creates the persistent train/validation/test bundles, and writes
+`adbench_suite_manifest.json`.
+
+The workflow `.github/workflows/prepare-adbench.yml` runs the same pipeline,
+validates every generated bundle, and publishes
+`adbench-encoded-seed123-bins8` as a CI artifact.

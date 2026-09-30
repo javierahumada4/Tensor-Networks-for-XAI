@@ -414,3 +414,45 @@ Generate paper figures from downloaded experiment outputs with:
 python -m pip install -r requirements-plot.txt
 python plot_interaction_results.py outputs/interactions outputs/figures
 ```
+
+
+## Synthetic planted-order validation
+
+The raw interaction method is also validated end-to-end on four synthetic
+one-class problems with known interaction structure:
+
+| Case | Planted order | Median c before planted order | Median stable order <=10% | Median stable order <=5% |
+|---|---:|---:|---:|---:|
+| marginal | 1 | - | 1 | 1 |
+| pairwise | 2 | 0.686 | 2 | 2 |
+| parity3 | 3 | 0.605 | 3 | 3 |
+| parity4 | 4 | 0.535 | 4 | 4 |
+
+Each dependency case uses a 2% normal violation probability so anomalous
+configurations remain inside the support of the normal distribution. For parity
+orders 2--4, all proper subsets of the planted variables have uniform
+population marginals; the dependency first appears at the planted order.
+
+For all 100 sampled anomalies in every case, the stable explanation order at
+both 5% and 10% residual matches the planted order. The complete decomposition
+closes at the planted/full order.
+
+Reproduce the datasets with `prepare_synthetic.py`. The frozen validation
+provenance is stored in `synthetic_interactions_manifest.json`, and the compact
+table is in `results/synthetic_interaction_order.csv`.
+
+## Publication figure artifact
+
+The corrected final real-data interaction results are rendered by
+`plot_interaction_results.py`. The frozen figure workflow run is
+`36749435327`, artifact `11113413874`, with digest:
+
+```
+sha256:46da5c24b719222aee7b3fa0afa8b7e4cd00acd211c6d68ba7a6898164360bcb
+```
+
+The main fidelity figure reports median `c_m` with IQR bands. The sparsity
+figure uses the common maximum retained-interaction budget `2k` on the
+horizontal axis, while the threshold tables report the actual number of retained
+terms. `cardio` is shown with a dashed curve because its interaction expansion
+is truncated at order 3.

@@ -444,12 +444,16 @@ table is in `results/synthetic_interaction_order.csv`.
 ## Publication figure artifact
 
 The corrected final real-data interaction results are rendered by
-`plot_interaction_results.py`. The frozen figure workflow run is
-`36749435327`, artifact `11113413874`, with digest:
+`plot_interaction_results.py`. The frozen corrected figure workflow run is
+`36749699314`, artifact `11113579074`, with digest:
 
 ```
-sha256:46da5c24b719222aee7b3fa0afa8b7e4cd00acd211c6d68ba7a6898164360bcb
+sha256:994bfc7de6c8c6806b825f37f3694834845b0e0c2905d6f8d76de452d270cf96
 ```
+
+The linear views do not impose an upper y-limit, so non-monotone residual
+excursions and IQR bands are not clipped. Horizontal reference lines mark
+5% and 10% relative reconstruction residual.
 
 The main fidelity figure reports median `c_m` with IQR bands. The sparsity
 figure uses the common maximum retained-interaction budget `2k` on the

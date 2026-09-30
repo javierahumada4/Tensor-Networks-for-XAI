@@ -341,6 +341,11 @@ At step `k`, the explanation retains the `k` largest positive interactions
 and the `k` most negative interactions. Fidelity is measured with the same
 relative NLL reconstruction residual `c_k`.
 
+For aggregate curves, the common horizontal axis is the maximum budget `2k`,
+because it is identical across samples even when one sign has fewer than `k`
+available terms. Per-sample threshold tables report the **actual** number of
+retained interactions. As with `c_m`, `c_k` is not assumed monotone.
+
 The final real-data experiment uses uniform sampling without replacement from
 the labeled test anomalies, seed `123`, and at most 100 anomalies per dataset
 (all 50 anomalies for `vowels`). The maximum interaction order is fixed by a

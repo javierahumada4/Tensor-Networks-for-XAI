@@ -9,5 +9,7 @@ venv/
 *.log
 logs/
 outputs/
+artifacts/
+data/
+.cache/
 .DS_Store
-artifacts/\ndata/\n

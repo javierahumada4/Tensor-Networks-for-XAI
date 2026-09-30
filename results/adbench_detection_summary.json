@@ -1,0 +1,24 @@
+{
+  "format_version": 1,
+  "final_training_run_id": 36734660642,
+  "evaluation_run_id": 36739013551,
+  "evaluation_artifact_id": 11108611680,
+  "evaluation_artifact_digest": "sha256:67f53e3a550a6d5a619469be601292e1da096feb164c9592c8f0ec3957273aa0",
+  "selection": {
+    "max_bond_dim": 16,
+    "epsilon_trunc": 0,
+    "lr": 0.002,
+    "selection_metric": "normal validation NLL only"
+  },
+  "aggregate": {
+    "macro_trained_auroc": 0.7574316615497733,
+    "macro_trained_auprc": 0.5942004913751301,
+    "macro_independent_auroc": 0.7567738769593347,
+    "macro_independent_auprc": 0.5781522109594569,
+    "macro_delta_auroc": 0.0006577845904386278,
+    "macro_delta_auprc": 0.01604828041567316,
+    "datasets_trained_auroc_better": 2,
+    "datasets_trained_auprc_better": 3
+  },
+  "note": "Test labels were used only after model and hyperparameter selection. The independent baseline is the empirical product distribution used to initialize the MPS."
+}

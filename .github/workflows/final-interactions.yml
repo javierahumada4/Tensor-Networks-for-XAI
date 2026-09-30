@@ -1,6 +1,11 @@
 name: final-raw-interaction-experiments
 
 on:
+  pull_request:
+    paths:
+      - "mps_interactions.py"
+      - "run_interaction_experiments.py"
+      - ".github/workflows/final-interactions.yml"
   workflow_dispatch:
 
 jobs:

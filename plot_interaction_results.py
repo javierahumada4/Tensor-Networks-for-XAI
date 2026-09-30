@@ -23,12 +23,28 @@ def label(dataset: str) -> str:
     return "cardio (orders <= 3)" if dataset == "cardio" else dataset
 
 
+def line_kwargs(dataset: str) -> dict:
+    return {"linestyle": "--"} if dataset == "cardio" else {}
+
+
 def plot_fidelity(results_root: Path, output_dir: Path) -> None:
     # Presentation view: the scientifically relevant residual range.
     fig, ax = plt.subplots(figsize=(8, 5))
     for dataset in DATASETS:
         frame = pd.read_csv(results_root / dataset / "fidelity_summary.csv")
-        ax.plot(frame["order"], frame["median_c_m"], label=label(dataset))
+        kwargs = line_kwargs(dataset)
+        ax.plot(
+            frame["order"],
+            frame["median_c_m"],
+            label=label(dataset),
+            **kwargs,
+        )
+        ax.fill_between(
+            frame["order"],
+            frame["q25_c_m"],
+            frame["q75_c_m"],
+            alpha=0.12,
+        )
     ax.set_xlabel("Maximum interaction order m")
     ax.set_ylabel("Median relative NLL reconstruction residual c_m")
     ax.set_title("Explanation fidelity vs interaction order")
@@ -44,7 +60,8 @@ def plot_fidelity(results_root: Path, output_dir: Path) -> None:
     for dataset in DATASETS:
         frame = pd.read_csv(results_root / dataset / "fidelity_summary.csv")
         residual = frame["median_c_m"].clip(lower=1e-12)
-        ax.plot(frame["order"], residual, label=label(dataset))
+        kwargs = line_kwargs(dataset)
+        ax.plot(frame["order"], residual, label=label(dataset), **kwargs)
     ax.set_yscale("log")
     ax.set_xlabel("Maximum interaction order m")
     ax.set_ylabel("Median relative NLL reconstruction residual c_m")
@@ -62,16 +79,24 @@ def plot_sparsity(results_root: Path, output_dir: Path) -> None:
     for dataset in DATASETS:
         frame = pd.read_csv(results_root / dataset / "sparsity_summary.csv")
         frame = frame[frame["median_num_interactions"] > 0]
+        kwargs = line_kwargs(dataset)
         ax.plot(
             frame["median_num_interactions"],
             frame["median_c_k"],
             label=label(dataset),
+            **kwargs,
+        )
+        ax.fill_between(
+            frame["median_num_interactions"],
+            frame["q25_c_k"],
+            frame["q75_c_k"],
+            alpha=0.12,
         )
     ax.set_xscale("log")
     ax.set_xlabel("Median number of retained interactions")
     ax.set_ylabel("Median relative NLL reconstruction residual c_k")
     ax.set_title("Explanation sparsity vs number of interactions")
-    ax.set_ylim(bottom=0.0, top=0.35)
+    ax.set_ylim(bottom=0.0, top=1.05)
     ax.legend()
     fig.tight_layout()
     fig.savefig(output_dir / "sparsity_vs_interactions.png", dpi=220)
@@ -83,10 +108,12 @@ def plot_sparsity(results_root: Path, output_dir: Path) -> None:
     for dataset in DATASETS:
         frame = pd.read_csv(results_root / dataset / "sparsity_summary.csv")
         residual = frame["median_c_k"].clip(lower=1e-12)
+        kwargs = line_kwargs(dataset)
         ax.plot(
             frame["median_num_interactions"],
             residual,
             label=label(dataset),
+            **kwargs,
         )
     ax.set_yscale("log")
     ax.set_xlabel("Median number of retained interactions")

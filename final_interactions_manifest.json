@@ -1,0 +1,61 @@
+{
+  "format_version": 1,
+  "workflow_run_id": 36741540641,
+  "code_commit": "11bd27c89712d5dc378b778bfadfc257dee7813e",
+  "sampling": {
+    "population": "labeled test anomalies",
+    "method": "uniform without replacement",
+    "seed": 123,
+    "max_samples_per_dataset": 100,
+    "max_subsets_per_sample": 5000
+  },
+  "datasets": {
+    "annthyroid": {
+      "samples": 100,
+      "max_order": 6,
+      "full_decomposition": true,
+      "artifact_id": 11110578085,
+      "digest": "sha256:820f608e75456a88d429d50eae24b1afdefb11286f192815af21bd7e25aea5f3"
+    },
+    "cardio": {
+      "samples": 100,
+      "max_order": 3,
+      "full_decomposition": false,
+      "artifact_id": 11110493746,
+      "digest": "sha256:1fb21fc18f59e6a29359a0ac584f5b4c91028e672cdaf9e12e03023b7286e840"
+    },
+    "cover": {
+      "samples": 100,
+      "max_order": 10,
+      "full_decomposition": true,
+      "artifact_id": 11110313083,
+      "digest": "sha256:a7a1f03c6e1fcc996f4c4fdd17f30efba162c5f4264abff43aac6affdb8880f4"
+    },
+    "mammography": {
+      "samples": 100,
+      "max_order": 6,
+      "full_decomposition": true,
+      "artifact_id": 11110890267,
+      "digest": "sha256:ddb1ab64a668e7dd1a619dd559c44b2fdb343a8a497ca731a4e88da1fac607f1"
+    },
+    "shuttle": {
+      "samples": 100,
+      "max_order": 9,
+      "full_decomposition": true,
+      "artifact_id": 11110298585,
+      "digest": "sha256:ad7b47e63e9441217eb874e7a29e6b150c0dd5ddd0e4180da71cb437825516c1"
+    },
+    "vowels": {
+      "samples": 50,
+      "max_order": 12,
+      "full_decomposition": true,
+      "artifact_id": 11111235158,
+      "digest": "sha256:3c5c202f3944baeb0628a069861f09de059bdd0182431842812186f20f66676c"
+    }
+  },
+  "metrics": {
+    "fidelity": "c_m = |NLL - sum_{1<=|S|<=m} I(S)| / NLL",
+    "sparsity": "top-k positive plus top-k negative raw interactions; same relative NLL reconstruction residual",
+    "stable_threshold_definition": "first point after which every remaining residual stays below the threshold"
+  }
+}

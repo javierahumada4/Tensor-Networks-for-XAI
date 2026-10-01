@@ -8,20 +8,73 @@ on:
       - "aggregate_nsl_kdd_interactions.py"
       - "plot_nsl_kdd_interactions.py"
       - "mps_interactions.py"
+      - "regress_nsl_kdd.py"
       - ".github/workflows/nsl-kdd-interaction-experiments.yml"
 
 permissions:
   contents: read
-  actions: read
 
 env:
   NSL_KDD_COMMIT: "0804644cbc0a8af940ac8d9da4a90889f61b4d57"
   NSL_KDD_BASE: "https://raw.githubusercontent.com/mwinton/NSL-KDD-Data-Set/0804644cbc0a8af940ac8d9da4a90889f61b4d57"
-  MODEL_RUN_ID: "36754543152"
-  MODEL_ARTIFACT: "nsl-kdd-refactored-paper"
 
 jobs:
+  prepare-model:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --index-url https://download.pytorch.org/whl/cpu torch
+          python -m pip install "numpy>=1.26" "pandas>=2.0" "scikit-learn>=1.4"
+
+      - name: Recreate exact legacy NSL-KDD encoding
+        run: |
+          mkdir -p nsl_kdd
+          curl -fL "$NSL_KDD_BASE/KDDTrain%2B.txt" -o nsl_kdd/KDDTrain+.txt
+          curl -fL "$NSL_KDD_BASE/KDDTest%2B.txt" -o nsl_kdd/KDDTest+.txt
+          git fetch origin main:refs/remotes/origin/main
+          git show origin/main:encoder_nsl_kdd.py > /tmp/encoder_nsl_kdd.py
+          python /tmp/encoder_nsl_kdd.py nsl_kdd
+
+      - name: Reproduce validated D16 model
+        run: |
+          python regress_nsl_kdd.py nsl_kdd validated_model --variant paper
+
+      - name: Validate detection regression
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          s=json.loads(Path("validated_model/summary.json").read_text())
+          d=s["trained"]["detection"]
+          print("AUROC", d["auc_roc"], "AUPRC", d["auc_pr"])
+          if d["auc_roc"] < 0.94 or d["auc_pr"] < 0.94:
+              raise SystemExit("NSL-KDD D16 regression fell below validation floor")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nsl-kdd-interaction-base
+          path: |
+            validated_model/model.pt
+            validated_model/summary.json
+            nsl_kdd/test_X.pt
+            nsl_kdd/test_meta.pt
+            nsl_kdd/encoding_schema.json
+          if-no-files-found: error
+          retention-days: 90
+
   interactions:
+    needs: prepare-model
     runs-on: ubuntu-latest
     timeout-minutes: 360
     strategy:
@@ -41,33 +94,25 @@ jobs:
           python -m pip install --index-url https://download.pytorch.org/whl/cpu torch
           python -m pip install "numpy>=1.26" "pandas>=2.0"
 
-      - name: Download validated D16 NSL-KDD model
-        env:
-          GH_TOKEN: "${{ github.token }}"
-        run: |
-          mkdir -p validated_model
-          gh run download "$MODEL_RUN_ID" \
-            --name "$MODEL_ARTIFACT" \
-            --dir validated_model
-          find validated_model -maxdepth 3 -type f -print
-          MODEL_PATH="$(find validated_model -name model.pt -print -quit)"
-          test -n "$MODEL_PATH"
-          cp "$MODEL_PATH" validated_model/model.pt
+      - name: Download validated model and frozen test encoding
+        uses: actions/download-artifact@v4
+        with:
+          name: nsl-kdd-interaction-base
+          path: base
 
-      - name: Recreate exact legacy NSL-KDD encoding
-        run: |
-          mkdir -p nsl_kdd
-          curl -fL "$NSL_KDD_BASE/KDDTrain%2B.txt" -o nsl_kdd/KDDTrain+.txt
-          curl -fL "$NSL_KDD_BASE/KDDTest%2B.txt" -o nsl_kdd/KDDTest+.txt
-          git fetch origin main:refs/remotes/origin/main
-          git show origin/main:encoder_nsl_kdd.py > /tmp/encoder_nsl_kdd.py
-          python /tmp/encoder_nsl_kdd.py nsl_kdd
+      - name: Show base artifact
+        run: find base -maxdepth 4 -type f -print
 
       - name: Run interaction shard
         run: |
+          MODEL_PATH="$(find base -name model.pt -print -quit)"
+          TEST_X="$(find base -name test_X.pt -print -quit)"
+          DATA_DIR="$(dirname "$TEST_X")"
+          test -n "$MODEL_PATH"
+          test -n "$TEST_X"
           python run_nsl_kdd_interaction_experiments.py \
-            nsl_kdd \
-            validated_model/model.pt \
+            "$DATA_DIR" \
+            "$MODEL_PATH" \
             "shard-${{ matrix.shard }}" \
             --max-samples 100 \
             --max-order 3 \

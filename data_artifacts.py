@@ -129,6 +129,7 @@ def prepare_one_class_artifacts(
     continuous_columns: Optional[Sequence[str]] = None,
     drop_columns: Optional[Sequence[str]] = None,
     max_categories: int = 64,
+    max_discrete_numeric_states: int = 8,
 ) -> EncodedDatasetBundle:
     """Create one reproducible one-class split and persist all encoded artifacts.
 
@@ -182,6 +183,7 @@ def prepare_one_class_artifacts(
         continuous_columns=continuous_columns,
         drop_columns=drop_columns,
         max_categories=max_categories,
+        max_discrete_numeric_states=max_discrete_numeric_states,
     )
     encoder.fit(features.iloc[train_idx])
 
@@ -236,6 +238,7 @@ def prepare_one_class_artifacts(
         "encoder": {
             "n_bins": encoder.n_bins,
             "max_categories": encoder.max_categories,
+            "max_discrete_numeric_states": encoder.max_discrete_numeric_states,
         },
         "feature_names": encoder.feature_names,
         "feature_types": encoder.feature_types,

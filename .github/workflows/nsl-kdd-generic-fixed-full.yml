@@ -1,0 +1,40 @@
+name: nsl-kdd-generic-fixed-full
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/nsl-kdd-generic-fixed-full.yml"
+
+env:
+  NSL_KDD_BASE: "https://raw.githubusercontent.com/mwinton/NSL-KDD-Data-Set/0804644cbc0a8af940ac8d9da4a90889f61b4d57"
+
+jobs:
+  train:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: |
+          python -m pip install --index-url https://download.pytorch.org/whl/cpu torch
+          python -m pip install "numpy>=1.26" "pandas>=2.0" "scikit-learn>=1.4"
+      - name: Download pinned NSL-KDD
+        run: |
+          mkdir -p nsl_kdd
+          curl -fL "$NSL_KDD_BASE/KDDTrain%2B.txt" -o nsl_kdd/KDDTrain+.txt
+          curl -fL "$NSL_KDD_BASE/KDDTest%2B.txt" -o nsl_kdd/KDDTest+.txt
+      - name: Train corrected generic encoder + refactored MPS
+        run: |
+          python regress_nsl_kdd_generic.py \
+            nsl_kdd \
+            outputs/generic_fixed \
+            --train-model
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nsl-kdd-generic-fixed-full
+          path: outputs/generic_fixed
+          if-no-files-found: error
+          retention-days: 90

@@ -110,5 +110,46 @@
       "fixed_independent_auc_pr": 0.9597674723008377,
       "auc_pr_gain": 0.0517906297236869
     }
+  },
+  "fixed_generic_encoder_full_mps": {
+    "workflow_run_id": 36822175537,
+    "artifact_id": 11143754241,
+    "artifact_digest": "sha256:0189ba4392c4eff13733749449061bc8c3595cafb366c7ec7671a17bbba9cb80",
+    "code_commit": "b32ee1634109f3d745a371378813ecbba205bac4",
+    "config": {
+      "max_bond_dim": 16,
+      "epsilon_trunc": 0,
+      "lr": 0.002,
+      "num_descent_steps": 1,
+      "max_loops": 30
+    },
+    "independent_baseline": {
+      "auc_roc": 0.9576706424488732,
+      "auc_pr": 0.9597674723008377
+    },
+    "trained": {
+      "auc_roc": 0.9545020499431145,
+      "auc_pr": 0.9476832631133801,
+      "best_loop": 29,
+      "best_val_nll": 11.43513191350744,
+      "max_bond_dim_observed": 16,
+      "total_skipped_nan": 0,
+      "elapsed_s": 306.667070965
+    },
+    "conclusion": "The corrected generic encoder plus refactored MPS reproduces TFG-level NSL-KDD detection without using the NSL-KDD-specific legacy encoder."
+  },
+  "final_diagnosis": {
+    "mps_refactor_status": "passes NSL-KDD regression",
+    "encoder_original_status": "failed regression due to destructive degenerate quantile binning",
+    "encoder_corrected_status": "passes NSL-KDD threshold-free regression",
+    "comparison": {
+      "thesis_auc_roc": 0.953,
+      "thesis_auc_pr": 0.95,
+      "refactored_legacy_encoder_auc_roc": 0.9560944026060786,
+      "refactored_legacy_encoder_auc_pr": 0.9496601956972915,
+      "corrected_generic_auc_roc": 0.9545020499431145,
+      "corrected_generic_auc_pr": 0.9476832631133801
+    },
+    "publication_action": "Regenerate every ADBench encoded bundle, model, detection table, and real-data XAI result with the corrected generic encoder before using them in the paper."
   }
 }

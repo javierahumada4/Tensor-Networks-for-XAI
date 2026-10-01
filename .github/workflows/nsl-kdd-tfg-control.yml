@@ -1,13 +1,7 @@
 name: nsl-kdd-tfg-control
 
 on:
-  pull_request:
-    paths:
-      - ".github/workflows/nsl-kdd-tfg-control.yml"
   workflow_dispatch:
-
-env:
-  NSL_KDD_BASE: "https://raw.githubusercontent.com/mwinton/NSL-KDD-Data-Set/0804644cbc0a8af940ac8d9da4a90889f61b4d57"
 
 jobs:
   control:

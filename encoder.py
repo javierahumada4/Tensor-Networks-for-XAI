@@ -78,6 +78,11 @@ class TabularEncoder:
         Maximum number of observed training categories allowed for one
         categorical feature. Higher-cardinality variables must be explicitly
         transformed or dropped rather than silently hashed.
+    max_discrete_numeric_states:
+        Automatically preserve integer-like numeric variables with at most this
+        many distinct training values as exact discrete states. Explicitly
+        declared continuous columns bypass this inference and always use
+        quantile binning.
     """
 
     FORMAT_VERSION = 1
@@ -90,6 +95,7 @@ class TabularEncoder:
         continuous_columns: Optional[Sequence[str]] = None,
         drop_columns: Optional[Sequence[str]] = None,
         max_categories: int = 64,
+        max_discrete_numeric_states: int = 8,
     ) -> None:
         if n_bins < 1:
             raise ValueError(f"n_bins must be >= 1, got {n_bins}")
@@ -97,11 +103,17 @@ class TabularEncoder:
             raise ValueError(
                 f"max_categories must be >= 1, got {max_categories}"
             )
+        if max_discrete_numeric_states < 2:
+            raise ValueError(
+                "max_discrete_numeric_states must be >= 2, got "
+                f"{max_discrete_numeric_states}"
+            )
         self.n_bins = int(n_bins)
         self.categorical_columns = list(categorical_columns or [])
         self.continuous_columns = list(continuous_columns or [])
         self.drop_columns = list(drop_columns or [])
         self.max_categories = int(max_categories)
+        self.max_discrete_numeric_states = int(max_discrete_numeric_states)
 
         overlap = set(self.categorical_columns) & set(self.continuous_columns)
         if overlap:
@@ -143,9 +155,18 @@ class TabularEncoder:
             return "categorical"
         if name in self.continuous_columns:
             return "continuous"
-        if pd.api.types.is_numeric_dtype(frame[name].dtype) and not pd.api.types.is_bool_dtype(
-            frame[name].dtype
-        ):
+        if pd.api.types.is_bool_dtype(frame[name].dtype):
+            return "categorical"
+        if pd.api.types.is_numeric_dtype(frame[name].dtype):
+            numeric = self._numeric_series(frame[name], name).dropna()
+            if len(numeric) == 0:
+                return "continuous"
+            unique = np.sort(numeric.unique())
+            if len(unique) == 1:
+                return "continuous"
+            integer_like = np.all(np.isclose(unique, np.round(unique)))
+            if integer_like and len(unique) <= self.max_discrete_numeric_states:
+                return "discrete_numeric"
             return "continuous"
         return "categorical"
 
@@ -205,7 +226,13 @@ class TabularEncoder:
             inner_edges=inner_edges,
         )
 
-    def _fit_categorical(self, series: pd.Series, name: str) -> FeatureSpec:
+    def _fit_categorical(
+        self,
+        series: pd.Series,
+        name: str,
+        *,
+        kind: str = "categorical",
+    ) -> FeatureSpec:
         observed = series[series.notna()]
         if len(observed) == 0:
             raise ValueError(
@@ -234,7 +261,7 @@ class TabularEncoder:
 
         return FeatureSpec(
             name=name,
-            kind="categorical",
+            kind=kind,
             physical_dim=regular_states + 2,
             regular_states=regular_states,
             missing_code=missing_code,
@@ -261,6 +288,14 @@ class TabularEncoder:
             kind = self._kind_for_column(frame, name)
             if kind == "continuous":
                 specs.append(self._fit_continuous(frame[name], name))
+            elif kind == "discrete_numeric":
+                specs.append(
+                    self._fit_categorical(
+                        self._numeric_series(frame[name], name),
+                        name,
+                        kind="discrete_numeric",
+                    )
+                )
             else:
                 specs.append(self._fit_categorical(frame[name], name))
 
@@ -344,6 +379,7 @@ class TabularEncoder:
                 "continuous_columns": self.continuous_columns,
                 "drop_columns": self.drop_columns,
                 "max_categories": self.max_categories,
+                "max_discrete_numeric_states": self.max_discrete_numeric_states,
             },
             "feature_names": self.feature_names,
             "specs": [asdict(spec) for spec in self.specs],

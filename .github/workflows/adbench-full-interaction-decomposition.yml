@@ -1,0 +1,122 @@
+name: adbench-full-interaction-decomposition
+
+on:
+  push:
+    branches:
+      - paper-mps-clean
+    paths:
+      - "run_adbench_full_decomposition.py"
+      - "plot_adbench_full_decomposition.py"
+      - ".github/workflows/adbench-full-interaction-decomposition.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  prepare-data:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: |
+          python -m pip install --index-url https://download.pytorch.org/whl/cpu torch
+          python -m pip install "numpy>=1.26" "pandas>=2.0" "scikit-learn>=1.4"
+      - name: Prepare corrected ADBench encoding
+        run: |
+          python prepare_adbench.py artifacts/adbench \
+            --cache-dir .cache/adbench \
+            --seed 123 \
+            --bins 8 \
+            --train-fraction 0.70 \
+            --val-fraction 0.15
+      - uses: actions/upload-artifact@v4
+        with:
+          name: adbench-full-data
+          path: artifacts/adbench
+          if-no-files-found: error
+          retention-days: 90
+
+  train-and-decompose:
+    needs: prepare-data
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        dataset: [annthyroid, mammography, shuttle, cover, vowels]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: |
+          python -m pip install --index-url https://download.pytorch.org/whl/cpu torch
+          python -m pip install "numpy>=1.26" "pandas>=2.0" "scikit-learn>=1.4"
+      - uses: actions/download-artifact@v4
+        with:
+          name: adbench-full-data
+          path: artifacts/adbench
+      - name: Train with the same configuration as the previous corrected run
+        run: |
+          python train_adbench_final.py \
+            artifacts/adbench \
+            "${{ matrix.dataset }}" \
+            "outputs/${{ matrix.dataset }}" \
+            --max-bond-dim 16 \
+            --epsilon-trunc 0.0 \
+            --lr 0.002 \
+            --batch-size 1024 \
+            --max-loops 30 \
+            --lr-patience 5 \
+            --lr-shrink 0.5 \
+            --lr-min 1e-5 \
+            --early-stopping-patience 10 \
+            --seed 123
+      - name: Compute every interaction order through d
+        run: |
+          python run_adbench_full_decomposition.py \
+            artifacts/adbench \
+            "${{ matrix.dataset }}" \
+            "outputs/${{ matrix.dataset }}" \
+            "results/${{ matrix.dataset }}" \
+            --max-samples 50 \
+            --seed 123
+      - uses: actions/upload-artifact@v4
+        with:
+          name: adbench-full-${{ matrix.dataset }}
+          path: results/${{ matrix.dataset }}
+          if-no-files-found: error
+          retention-days: 90
+
+  aggregate:
+    needs: train-and-decompose
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install analysis dependencies
+        run: python -m pip install "numpy>=1.26" "pandas>=2.0" "matplotlib>=3.8"
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: adbench-full-*
+          path: downloaded
+          merge-multiple: false
+      - name: Build report and figures
+        run: |
+          python plot_adbench_full_decomposition.py downloaded results/adbench_full_decomposition
+          cat results/adbench_full_decomposition/report.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: adbench-full-interaction-decomposition
+          path: results/adbench_full_decomposition
+          if-no-files-found: error
+          retention-days: 90

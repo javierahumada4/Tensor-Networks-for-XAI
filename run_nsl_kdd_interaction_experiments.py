@@ -135,13 +135,13 @@ def main() -> None:
     rng = np.random.default_rng(args.seed)
     sample_count = min(args.max_samples, len(anomaly_positions))
     if sample_count == len(anomaly_positions):
-        selected = np.sort(anomaly_positions)
+        selected_all = np.sort(anomaly_positions)
     else:
-        selected = np.sort(
+        selected_all = np.sort(
             rng.choice(anomaly_positions, size=sample_count, replace=False)
         )
 
-    selected = selected[args.shard_index :: args.num_shards]
+    selected = selected_all[args.shard_index :: args.num_shards]
     family_names = list(test_meta["family_names"])
     family_code = test_meta["family_code"].numpy().astype(np.int64)
 
@@ -162,15 +162,7 @@ def main() -> None:
         sparsity = fast_sparsity_curve(score, interactions)
 
         global_sample_index = int(
-            np.where(
-                np.sort(
-                    rng.choice(anomaly_positions, size=sample_count, replace=False)
-                )
-                == test_position
-            )[0][0]
-            + 1
-        ) if sample_count != len(anomaly_positions) else int(
-            np.where(np.sort(anomaly_positions) == test_position)[0][0] + 1
+            np.searchsorted(selected_all, test_position) + 1
         )
 
         common = {

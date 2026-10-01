@@ -359,6 +359,11 @@ class TabularEncoder:
         for spec in self.specs:
             if spec.kind == "continuous":
                 encoded = self._transform_continuous(frame[spec.name], spec)
+            elif spec.kind == "discrete_numeric":
+                encoded = self._transform_categorical(
+                    self._numeric_series(frame[spec.name], spec.name),
+                    spec,
+                )
             else:
                 encoded = self._transform_categorical(frame[spec.name], spec)
             columns.append(encoded)

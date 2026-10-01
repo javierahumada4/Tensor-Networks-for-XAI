@@ -1,6 +1,9 @@
 name: nsl-kdd-generic-encoder-regression
 
 on:
+  push:
+    branches:
+      - paper-mps-clean
   pull_request:
     paths:
       - "regress_nsl_kdd_generic.py"

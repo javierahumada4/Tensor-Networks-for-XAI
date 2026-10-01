@@ -1,0 +1,59 @@
+name: evaluate-final-adbench-mps
+
+on:
+  workflow_dispatch:
+
+jobs:
+  evaluate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      actions: read
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --index-url https://download.pytorch.org/whl/cpu torch
+          python -m pip install "numpy>=1.26" "pandas>=2.0" "scikit-learn>=1.4"
+
+      - name: Prepare the frozen encoded datasets
+        run: |
+          python prepare_adbench.py artifacts/adbench \
+            --cache-dir .cache/adbench \
+            --seed 123 \
+            --bins 8
+
+      - name: Download frozen final model artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          RUN_ID=$(python -c 'import json; print(json.load(open("final_training_manifest.json"))["workflow_run_id"])')
+          for dataset in annthyroid cardio cover mammography shuttle vowels; do
+            mkdir -p "outputs/final/$dataset"
+            gh run download "$RUN_ID" \
+              --repo "${{ github.repository }}" \
+              --name "final-mps-$dataset" \
+              --dir "outputs/final/$dataset"
+          done
+
+      - name: Evaluate frozen models
+        run: |
+          python evaluate_adbench_final.py \
+            artifacts/adbench \
+            outputs/final \
+            outputs/evaluation
+
+      - name: Upload evaluation
+        uses: actions/upload-artifact@v4
+        with:
+          name: final-adbench-mps-evaluation
+          path: outputs/evaluation
+          if-no-files-found: error
+          retention-days: 90

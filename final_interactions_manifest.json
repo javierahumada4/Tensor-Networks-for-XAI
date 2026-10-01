@@ -1,0 +1,65 @@
+{
+  "format_version": 1,
+  "workflow_run_id": 36747943106,
+  "code_commit": "7d0e73d0a04dc83dbf6e6afbd4fa0ed908f94bc4",
+  "numerical_closure": {
+    "method": "For the complete subset S=D, h_x(D) reuses the model NLL contraction exactly; compensated summation is used for Moebius reconstruction.",
+    "max_relative_full_order_residual_across_complete_datasets": 2.6800800179717853e-16
+  },
+  "sampling": {
+    "population": "labeled test anomalies",
+    "method": "uniform without replacement",
+    "seed": 123,
+    "max_samples_per_dataset": 100,
+    "max_subsets_per_sample": 5000
+  },
+  "datasets": {
+    "annthyroid": {
+      "samples": 100,
+      "max_order": 6,
+      "full_decomposition": true,
+      "artifact_id": 11112804118,
+      "digest": "sha256:83e6ac6ac174a43f9c68bf28da24ddb0fb43e9d38eeb7651ae545aa917110cf5"
+    },
+    "cardio": {
+      "samples": 100,
+      "max_order": 3,
+      "full_decomposition": false,
+      "artifact_id": 11113042806,
+      "digest": "sha256:492bf9749290c3f2683f7c53128ea5b9c37805e4c90d0dbd6b8aefe2d6701616"
+    },
+    "cover": {
+      "samples": 100,
+      "max_order": 10,
+      "full_decomposition": true,
+      "artifact_id": 11112604291,
+      "digest": "sha256:dd215e94916de3d68691677065cf6abf35a941e384b5ea244b529c1d7515d6a9"
+    },
+    "mammography": {
+      "samples": 100,
+      "max_order": 6,
+      "full_decomposition": true,
+      "artifact_id": 11112539381,
+      "digest": "sha256:07d79991049e78d2958bab221ce1fdde5244100388af3158a046ff1e89f82f4b"
+    },
+    "shuttle": {
+      "samples": 100,
+      "max_order": 9,
+      "full_decomposition": true,
+      "artifact_id": 11113591284,
+      "digest": "sha256:fc6c89d520446101fe4989cf8e5e01dcea1352b9db178f6c6a1b38a5b8db85ee"
+    },
+    "vowels": {
+      "samples": 50,
+      "max_order": 12,
+      "full_decomposition": true,
+      "artifact_id": 11113027869,
+      "digest": "sha256:61a16e7ca1aa01a023f6ae2f920a7c19683ba70c2c510476102c14a965d44719"
+    }
+  },
+  "metrics": {
+    "fidelity": "c_m = |NLL - sum_{1<=|S|<=m} I(S)| / NLL",
+    "sparsity": "top-k positive plus top-k negative raw interactions; same relative NLL reconstruction residual",
+    "stable_threshold_definition": "first point after which every remaining residual stays below the threshold"
+  }
+}

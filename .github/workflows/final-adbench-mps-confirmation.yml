@@ -1,0 +1,39 @@
+name: final-adbench-mps-hyperparameter-confirmation
+
+on:
+  workflow_dispatch:
+
+jobs:
+  confirm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install CPU dependencies
+        run: |
+          python -m pip install --index-url https://download.pytorch.org/whl/cpu torch
+          python -m pip install "numpy>=1.26" "pandas>=2.0"
+      - name: Prepare datasets
+        run: |
+          python prepare_adbench.py artifacts/adbench \
+            --cache-dir .cache/adbench \
+            --seed 123 \
+            --bins 8
+      - name: Resolve final hyperparameter ambiguity
+        run: |
+          python confirm_adbench_mps_final.py \
+            artifacts/adbench \
+            outputs/final_hyperparameter_confirmation \
+            --batch-size 1024 \
+            --loops 10 \
+            --batches-per-loop 16 \
+            --seed 123
+      - name: Upload confirmation
+        uses: actions/upload-artifact@v4
+        with:
+          name: final-adbench-mps-hyperparameter-confirmation
+          path: outputs/final_hyperparameter_confirmation
+          retention-days: 90

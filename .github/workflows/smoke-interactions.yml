@@ -1,0 +1,73 @@
+name: smoke-raw-interaction-experiments
+
+on:
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      actions: read
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install CPU dependencies
+        run: |
+          python -m pip install --index-url https://download.pytorch.org/whl/cpu torch
+          python -m pip install "numpy>=1.26" "pandas>=2.0"
+
+      - name: Prepare encoded data
+        run: |
+          python prepare_adbench.py artifacts/adbench \
+            --cache-dir .cache/adbench \
+            --seed 123 \
+            --bins 8
+
+      - name: Download frozen mammography model
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          RUN_ID=$(python -c 'import json; print(json.load(open("final_training_manifest.json"))["workflow_run_id"])')
+          mkdir -p outputs/final/mammography
+          gh run download "$RUN_ID" \
+            --repo "${{ github.repository }}" \
+            --name "final-mps-mammography" \
+            --dir outputs/final/mammography
+
+      - name: Run five-anomaly raw-interaction smoke test
+        run: |
+          python run_interaction_experiments.py \
+            artifacts/adbench \
+            mammography \
+            outputs/final/mammography \
+            outputs/xai_smoke/mammography \
+            --max-samples 5 \
+            --max-order 6 \
+            --seed 123
+
+      - name: Validate exact full-order reconstruction
+        run: |
+          python - <<'PY'
+          import csv
+          from pathlib import Path
+
+          rows=list(csv.DictReader(
+              open("outputs/xai_smoke/mammography/samples.csv")
+          ))
+          assert len(rows) == 5
+          residuals=[float(row["c_at_max_order"]) for row in rows]
+          assert max(residuals) < 1e-8, residuals
+          print("max full-order c_m:", max(residuals))
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: raw-interaction-smoke-mammography
+          path: outputs/xai_smoke/mammography
+          retention-days: 30

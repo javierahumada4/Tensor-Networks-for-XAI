@@ -1,0 +1,5 @@
+case,planted_order,median_c1,median_c_before_planted_order,median_c_at_planted_order,stable_order_10pct_median,stable_order_5pct_median,stable_order_10pct_achieved,stable_order_5pct_achieved
+marginal,1,0.0018261072434984,,0.0018261072434984423,1,1,100,100
+pairwise,2,0.6859892630143493,0.6859892630143493,0.0,2,2,100,100
+parity3,3,0.604567388074531,0.6053132681142852,0.0,3,3,100,100
+parity4,4,0.534694648358651,0.5346900217030733,0.0,4,4,100,100

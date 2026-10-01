@@ -1,0 +1,105 @@
+name: train-final-adbench-mps
+
+on:
+  workflow_dispatch:
+
+jobs:
+  train:
+    strategy:
+      fail-fast: false
+      max-parallel: 6
+      matrix:
+        dataset:
+          - annthyroid
+          - cardio
+          - cover
+          - mammography
+          - shuttle
+          - vowels
+
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install CPU dependencies
+        run: |
+          python -m pip install --index-url https://download.pytorch.org/whl/cpu torch
+          python -m pip install "numpy>=1.26" "pandas>=2.0"
+
+      - name: Prepare encoded datasets
+        run: |
+          python prepare_adbench.py artifacts/adbench \
+            --cache-dir .cache/adbench \
+            --seed 123 \
+            --bins 8
+
+      - name: Read frozen paper configuration
+        shell: bash
+        run: |
+          echo "MAX_BOND_DIM=$(python -c 'import json; print(json.load(open("paper_mps_config.json"))["max_bond_dim"])')" >> "$GITHUB_ENV"
+          echo "EPSILON_TRUNC=$(python -c 'import json; print(json.load(open("paper_mps_config.json"))["epsilon_trunc"])')" >> "$GITHUB_ENV"
+          echo "LEARNING_RATE=$(python -c 'import json; print(json.load(open("paper_mps_config.json"))["lr"])')" >> "$GITHUB_ENV"
+
+      - name: Train final MPS
+        run: |
+          python train_adbench_final.py \
+            artifacts/adbench \
+            "${{ matrix.dataset }}" \
+            "outputs/final/${{ matrix.dataset }}" \
+            --max-bond-dim "$MAX_BOND_DIM" \
+            --epsilon-trunc "$EPSILON_TRUNC" \
+            --lr "$LEARNING_RATE" \
+            --batch-size 1024 \
+            --max-loops 30 \
+            --lr-patience 5 \
+            --lr-shrink 0.5 \
+            --lr-min 1e-5 \
+            --early-stopping-patience 10 \
+            --seed 123
+
+      - name: Validate final outputs
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          import torch
+
+          root = Path("outputs/final") / "${{ matrix.dataset }}"
+          required = [
+              "model.pt",
+              "history.json",
+              "train_log.jsonl",
+              "test_scores.pt",
+              "summary.json",
+          ]
+          for name in required:
+              path = root / name
+              assert path.exists() and path.stat().st_size > 0, path
+
+          summary = json.loads((root / "summary.json").read_text())
+          scores = torch.load(
+              root / "test_scores.pt",
+              map_location="cpu",
+              weights_only=True,
+          )
+          assert len(scores["nll"]) == summary["counts"]["test"]
+          assert len(scores["y"]) == summary["counts"]["test"]
+          assert torch.isfinite(scores["nll"]).all()
+          assert summary["total_skipped_nan"] == 0
+          print(json.dumps(summary, indent=2))
+          PY
+
+      - name: Upload final model
+        uses: actions/upload-artifact@v4
+        with:
+          name: final-mps-${{ matrix.dataset }}
+          path: outputs/final/${{ matrix.dataset }}
+          if-no-files-found: error
+          compression-level: 6
+          retention-days: 90

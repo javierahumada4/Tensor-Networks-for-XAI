@@ -1,0 +1,155 @@
+{
+  "format_version": 1,
+  "status": "encoder_regression_identified",
+  "dataset": {
+    "name": "NSL-KDD",
+    "source_repository": "mwinton/NSL-KDD-Data-Set",
+    "source_commit": "0804644cbc0a8af940ac8d9da4a90889f61b4d57",
+    "train_rows": 125973,
+    "test_rows": 22544,
+    "normal_train_rows": 67343,
+    "train_normal_after_val_split": 57242,
+    "val_normal_rows": 10101,
+    "test_attack_rows": 12833
+  },
+  "tfg_reference": {
+    "thesis_reported": {
+      "auc_roc": 0.953,
+      "auc_pr": 0.95,
+      "best_f1": 0.917
+    },
+    "rerun": {
+      "code_commit": "760b3cf760d825df4d26f6da88a3a37b26184c6f",
+      "workflow_run_id": 36754739649,
+      "artifact_id": 11120451777,
+      "artifact_digest": "sha256:2937aa88a2ab7caaaca78cebd66daa072a472434ebf02040e2a6d142691c368e",
+      "auc_roc": 0.9521906867530302,
+      "auc_pr": 0.952121485329393,
+      "f1_at_p94_5": 0.894353512412875
+    }
+  },
+  "refactored_mps_with_legacy_tfg_encoder": {
+    "workflow_run_id": 36754739640,
+    "artifact_id": 11116209682,
+    "config": {
+      "max_bond_dim": 16,
+      "epsilon_trunc": 0,
+      "lr": 0.002,
+      "num_descent_steps": 1
+    },
+    "independent_baseline": {
+      "auc_roc": 0.9638242953772664,
+      "auc_pr": 0.9645534767696708
+    },
+    "trained": {
+      "auc_roc": 0.9560944026060786,
+      "auc_pr": 0.9496601956972915,
+      "best_f1": 0.9045482110369921,
+      "best_f1_percentile": 93.5,
+      "best_val_nll": 8.55935298340477,
+      "best_loop": 27
+    },
+    "conclusion": "Refactored MPS training reproduces TFG-level threshold-free detection when the legacy encoder is held fixed."
+  },
+  "old_generic_encoder": {
+    "workflow_run_id": 36820616124,
+    "artifact_id": 11143637526,
+    "artifact_digest": "sha256:0648aaccfdb0a65828b14561cd6e516588366ee1c8c7faf425823b90b590f9ac",
+    "bins": 8,
+    "nonconstant_features_collapsed_to_one_state": 25,
+    "independent_baseline": {
+      "auc_roc": 0.9045146091963456,
+      "auc_pr": 0.9079768425771508
+    },
+    "trained_mps": {
+      "auc_roc": 0.9336523414948861,
+      "auc_pr": 0.9316419976214873,
+      "best_loop": 25,
+      "best_val_nll": 9.865389749423686
+    },
+    "conclusion": "The first generic encoder implementation destroyed substantial information; the MPS recovered part but not all of the lost detection performance."
+  },
+  "scientific_interpretation": [
+    "The empirical-frequency initialization is not responsible for the NSL-KDD regression.",
+    "Removing staged bond-dimension growth is not responsible for the NSL-KDD regression at Dmax=16.",
+    "Encoder choice dominates the observed NSL-KDD difference.",
+    "The legacy-encoder independent baseline exceeds the trained MPS in AUROC/AUPRC, so encoder and marginal rarity must be reported as a required baseline.",
+    "Previous ADBench results were produced with the pre-fix generic encoder and should be regenerated before publication."
+  ],
+  "encoder_fixes_in_progress": [
+    "preserve small-cardinality integer-like numeric variables as exact discrete states",
+    "never allow a nonconstant continuous feature to collapse to one regular state",
+    "normalize numeric discrete values consistently between fit and transform"
+  ],
+  "fixed_generic_encoder_audit": {
+    "workflow_run_id": 36821700064,
+    "artifact_id": 11144121489,
+    "artifact_digest": "sha256:05030b513153a9e88bdd4a8ec6684ab04a7ad6dbcaa8cd2ad718d65fb1f9e1d1",
+    "policy": {
+      "n_bins": 8,
+      "max_discrete_numeric_states": 8,
+      "continuous_fallback": "nonconstant continuous variables with degenerate quantiles are deterministically split into at least two regular states"
+    },
+    "independent_baseline": {
+      "auc_roc": 0.9576706424488732,
+      "auc_pr": 0.9597674723008377
+    },
+    "nonconstant_features_collapsed_to_one_state": 0,
+    "physical_dimension_sum": 264,
+    "max_physical_dimension": 28,
+    "conclusion": "Fixing degenerate quantile binning recovers nearly all of the legacy encoder's threshold-free anomaly ranking without NSL-KDD-specific feature rules."
+  },
+  "root_cause": {
+    "bug": "When every interior empirical quantile coincided with a feature endpoint, the generic encoder removed those cut points and encoded a nonconstant feature with one regular state.",
+    "observed_on_nsl_kdd": {
+      "affected_features": 25,
+      "old_independent_auc_roc": 0.9045146091963456,
+      "fixed_independent_auc_roc": 0.9576706424488732,
+      "auc_roc_gain": 0.05315603325252759,
+      "old_independent_auc_pr": 0.9079768425771508,
+      "fixed_independent_auc_pr": 0.9597674723008377,
+      "auc_pr_gain": 0.0517906297236869
+    }
+  },
+  "fixed_generic_encoder_full_mps": {
+    "workflow_run_id": 36822175537,
+    "artifact_id": 11143754241,
+    "artifact_digest": "sha256:0189ba4392c4eff13733749449061bc8c3595cafb366c7ec7671a17bbba9cb80",
+    "code_commit": "b32ee1634109f3d745a371378813ecbba205bac4",
+    "config": {
+      "max_bond_dim": 16,
+      "epsilon_trunc": 0,
+      "lr": 0.002,
+      "num_descent_steps": 1,
+      "max_loops": 30
+    },
+    "independent_baseline": {
+      "auc_roc": 0.9576706424488732,
+      "auc_pr": 0.9597674723008377
+    },
+    "trained": {
+      "auc_roc": 0.9545020499431145,
+      "auc_pr": 0.9476832631133801,
+      "best_loop": 29,
+      "best_val_nll": 11.43513191350744,
+      "max_bond_dim_observed": 16,
+      "total_skipped_nan": 0,
+      "elapsed_s": 306.667070965
+    },
+    "conclusion": "The corrected generic encoder plus refactored MPS reproduces TFG-level NSL-KDD detection without using the NSL-KDD-specific legacy encoder."
+  },
+  "final_diagnosis": {
+    "mps_refactor_status": "passes NSL-KDD regression",
+    "encoder_original_status": "failed regression due to destructive degenerate quantile binning",
+    "encoder_corrected_status": "passes NSL-KDD threshold-free regression",
+    "comparison": {
+      "thesis_auc_roc": 0.953,
+      "thesis_auc_pr": 0.95,
+      "refactored_legacy_encoder_auc_roc": 0.9560944026060786,
+      "refactored_legacy_encoder_auc_pr": 0.9496601956972915,
+      "corrected_generic_auc_roc": 0.9545020499431145,
+      "corrected_generic_auc_pr": 0.9476832631133801
+    },
+    "publication_action": "Regenerate every ADBench encoded bundle, model, detection table, and real-data XAI result with the corrected generic encoder before using them in the paper."
+  }
+}

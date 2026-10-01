@@ -1,0 +1,74 @@
+name: nsl-kdd-tfg-control
+
+on:
+  workflow_dispatch:
+
+jobs:
+  control:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Preserve Windows-compatible legacy module name
+        run: |
+          test -f MPS.py
+          cp MPS.py mps.py
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --index-url https://download.pytorch.org/whl/cpu torch
+          python -m pip install "numpy>=1.26" "pandas>=2.0" "scikit-learn>=1.4" "matplotlib>=3.8"
+
+      - name: Download pinned NSL-KDD
+        run: |
+          mkdir -p nsl_kdd
+          curl -fL "$NSL_KDD_BASE/KDDTrain%2B.txt" -o nsl_kdd/KDDTrain+.txt
+          curl -fL "$NSL_KDD_BASE/KDDTest%2B.txt" -o nsl_kdd/KDDTest+.txt
+
+      - name: Encode
+        run: python encoder_nsl_kdd.py nsl_kdd
+
+      - name: Train
+        run: python train_mps_nsl_kdd.py nsl_kdd
+
+      - name: Evaluate
+        run: python evaluate_mps_nsl_kdd.py nsl_kdd
+
+      - name: Record result
+        run: |
+          python - <<'PY'
+          import json, subprocess
+          from pathlib import Path
+          report=json.loads(Path("nsl_kdd/eval_report.json").read_text())
+          history=json.loads(Path("nsl_kdd/train_history.json").read_text())
+          finite=[r for r in history if "val_nll" in r]
+          best=min(finite,key=lambda r:r["val_nll"])
+          out={
+              "implementation":"TFG-original-main-linux-alias-only",
+              "code_commit":subprocess.check_output(["git","rev-parse","HEAD"],text=True).strip(),
+              "global_metrics":report["global_metrics"],
+              "metrics_per_threshold":report["metrics_per_threshold"],
+              "per_family":report["per_family"],
+              "best_training_record":best,
+              "model":report["model"],
+          }
+          Path("nsl_kdd/control_summary.json").write_text(json.dumps(out,indent=2))
+          print(json.dumps(out,indent=2))
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nsl-kdd-tfg-original-control
+          path: |
+            nsl_kdd/control_summary.json
+            nsl_kdd/eval_report.json
+            nsl_kdd/train_history.json
+            nsl_kdd/encoding_schema.json
+          retention-days: 90

@@ -1,0 +1,125 @@
+name: validate-synthetic-interaction-order
+
+on:
+  workflow_dispatch:
+
+jobs:
+  validate:
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        case:
+          - marginal
+          - pairwise
+          - parity3
+          - parity4
+
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install CPU dependencies
+        run: |
+          python -m pip install --index-url https://download.pytorch.org/whl/cpu torch
+          python -m pip install "numpy>=1.26" "pandas>=2.0"
+
+      - name: Prepare synthetic suite
+        run: |
+          python prepare_synthetic.py artifacts/synthetic \
+            --n-normal 20000 \
+            --n-anomaly 1000 \
+            --noise 0.02 \
+            --seed 123
+
+      - name: Read frozen paper configuration
+        shell: bash
+        run: |
+          echo "MAX_BOND_DIM=$(python -c 'import json; print(json.load(open("paper_mps_config.json"))["max_bond_dim"])')" >> "$GITHUB_ENV"
+          echo "EPSILON_TRUNC=$(python -c 'import json; print(json.load(open("paper_mps_config.json"))["epsilon_trunc"])')" >> "$GITHUB_ENV"
+          echo "LEARNING_RATE=$(python -c 'import json; print(json.load(open("paper_mps_config.json"))["lr"])')" >> "$GITHUB_ENV"
+
+      - name: Train synthetic MPS
+        run: |
+          python train_adbench_final.py \
+            artifacts/synthetic \
+            "${{ matrix.case }}" \
+            "outputs/synthetic/${{ matrix.case }}/model" \
+            --max-bond-dim "$MAX_BOND_DIM" \
+            --epsilon-trunc "$EPSILON_TRUNC" \
+            --lr "$LEARNING_RATE" \
+            --batch-size 1024 \
+            --max-loops 30 \
+            --lr-patience 5 \
+            --lr-shrink 0.5 \
+            --lr-min 1e-5 \
+            --early-stopping-patience 10 \
+            --seed 123
+
+      - name: Run planted-order interaction experiment
+        run: |
+          python run_interaction_experiments.py \
+            artifacts/synthetic \
+            "${{ matrix.case }}" \
+            "outputs/synthetic/${{ matrix.case }}/model" \
+            "outputs/synthetic/${{ matrix.case }}/interactions" \
+            --max-samples 100 \
+            --max-subsets-per-sample 5000 \
+            --seed 123
+
+      - name: Validate planted order
+        env:
+          CASE: "${{ matrix.case }}"
+        run: |
+          python - <<'PY'
+          import csv, json, os
+          from pathlib import Path
+
+          case=os.environ["CASE"]
+          root=Path("outputs/synthetic")/case/"interactions"
+          truth=json.loads(
+              (Path("artifacts/synthetic")/case/"synthetic_truth.json").read_text()
+          )
+          order=int(truth["planted_order"])
+          rows=list(csv.DictReader(open(root/"fidelity_summary.csv")))
+          by_order={int(r["order"]): r for r in rows}
+
+          full=float(by_order[max(by_order)]["median_c_m"])
+          assert full < 1e-10, (case, full)
+
+          if order == 1:
+              c1=float(by_order[1]["median_c_m"])
+              assert c1 < 0.05, (case, c1)
+          else:
+              before=float(by_order[order-1]["median_c_m"])
+              assert before > 0.10, (case, order, before)
+
+          report={
+              "case": case,
+              "planted_order": order,
+              "median_c_before_planted_order": (
+                  None if order == 1
+                  else float(by_order[order-1]["median_c_m"])
+              ),
+              "median_c_at_planted_order": float(by_order[order]["median_c_m"]),
+              "median_c_full_order": full,
+          }
+          (Path("outputs/synthetic")/case/"validation.json").write_text(
+              json.dumps(report,indent=2)
+          )
+          print(json.dumps(report,indent=2))
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: synthetic-order-${{ matrix.case }}
+          path: outputs/synthetic/${{ matrix.case }}
+          if-no-files-found: error
+          retention-days: 90

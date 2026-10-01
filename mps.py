@@ -1,0 +1,879 @@
+"""Dataset-agnostic Matrix Product State Born machine.
+
+The MPS class implements an open-boundary MPS for discrete probability
+modelling with the Born rule P(x) = |Psi(x)|^2 / Z.
+
+The paper workflow initializes the model from empirical one-site frequencies,
+so the initial distribution is exactly the product of the empirical marginals.
+Two-site likelihood updates can then introduce correlations while SVD
+truncation chooses the local bond ranks subject to a fixed maximum bond
+dimension and a discarded-weight tolerance.
+
+This module contains only model operations needed for training and scoring:
+stable amplitudes/probabilities, normalization, canonicalization, and two-site
+merge/SVD-split operations.
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import Dict, List, Optional, Sequence, Union
+
+import torch
+import torch.nn as nn
+
+logger = logging.getLogger(__name__)
+
+# ----------------------------------------------------------------------
+#  Exceptions
+# ----------------------------------------------------------------------
+
+class MPSError(Exception):
+    """Base class for all MPS errors."""
+
+class MPSShapeError(MPSError, ValueError):
+    """Tensor shape or index does not match the MPS configuration."""
+
+class MPSNumericalError(MPSError, RuntimeError):
+    """A numerical pathology was detected (NaN, overflow, vanishing norm)."""
+
+# ----------------------------------------------------------------------
+#  Checkpoint format
+# ----------------------------------------------------------------------
+
+_DTYPE_MAP: Dict[str, torch.dtype] = {
+        "float32": torch.float32,
+        "float64": torch.float64,
+        "complex64": torch.complex64,
+        "complex128": torch.complex128,
+    }
+_REVERSE_DTYPE_MAP: Dict[torch.dtype, str] = {value: key for key, value in _DTYPE_MAP.items()}
+
+class MPS(nn.Module):
+    """An open-boundary Matrix Product State used as a Born machine.
+
+    The state is a chain of ``num_sites`` rank-3 tensors. Site ``k`` has shape
+    ``(D_{k-1}, d_k, D_k)``; the outer bonds are pinned to 1, so the whole
+    contraction collapses to a scalar amplitude ``Psi(v)`` for any
+    configuration ``v``. Probabilities follow the Born rule,
+    ``P(v) = |Psi(v)|^2 / Z`` with ``Z = <Psi|Psi>``.
+
+    Physical dimensions may differ from site to site, allowing heterogeneous
+    discrete variables in the same chain.
+
+    The tensors are stored as an ``nn.ParameterList`` so the object is a normal
+    ``nn.Module`` (movable with ``.to``, saveable, etc.), but training is done by
+    DMRG sweeps rather than autograd — the trainer writes directly into
+    ``site_tensors[k].data``.
+
+    Notes on numerics: amplitudes are computed with per-site rescaling and the
+    running scale tracked in log space, so chains of dozens of sites don't
+    under/overflow. ``float64`` is the safe default for long chains.
+    """
+
+    # Above this fraction of discarded SVD weight, truncations log a warning.
+    _discarded_weight_warn_threshold: float = 0.1
+
+    def __init__(
+        self,
+        num_sites: int,
+        physical_dims: Union[int, Sequence[int]] = 2,
+        dtype: torch.dtype = torch.float64,
+        *,
+        _skip_init: bool = False,
+    ) -> None:
+        """Build a product-state MPS.
+
+        Direct construction uses a uniform product distribution. For model
+        training, prefer from_empirical_frequencies(), which initializes each
+        site from the empirical marginal distribution of the training data.
+
+        _skip_init is internal and used by load().
+        """
+        super().__init__()
+
+        if num_sites < 2:
+            raise MPSShapeError(f"num_sites must be >= 2, got {num_sites}")
+        if dtype not in (torch.float32, torch.float64, torch.complex64, torch.complex128):
+            raise TypeError(
+                f"Unsupported dtype: {dtype}. Use float32/float64/complex64/complex128."
+            )
+
+        self.num_sites = num_sites
+        self.dtype = dtype
+        self.physical_dims: List[int] = self._normalise_physical_dims(physical_dims)
+        self.site_tensors = self._empty_init() if _skip_init else self._uniform_product_init()
+
+    def _uniform_product_init(self) -> nn.ParameterList:
+        """Normalized bond-1 MPS representing independent uniform variables."""
+        tensors: List[nn.Parameter] = []
+        for physical_dim in self.physical_dims:
+            amplitude = float(physical_dim) ** -0.5
+            tensor = torch.full(
+                (1, physical_dim, 1),
+                amplitude,
+                dtype=self.dtype,
+            )
+            tensors.append(nn.Parameter(tensor))
+        return nn.ParameterList(tensors)
+
+    def _empty_init(self) -> nn.ParameterList:
+        """Zero-filled bond-1 tensors used only while loading a checkpoint."""
+        return nn.ParameterList(
+            [
+                nn.Parameter(torch.zeros(1, physical_dim, 1, dtype=self.dtype))
+                for physical_dim in self.physical_dims
+            ]
+        )
+
+    @classmethod
+    def from_empirical_frequencies(
+        cls,
+        configurations: torch.Tensor,
+        physical_dims: Optional[Sequence[int]] = None,
+        *,
+        dtype: torch.dtype = torch.float64,
+        pseudocount: float = 1e-6,
+    ) -> "MPS":
+        """Initialize the Born-MPS from empirical one-site marginals.
+
+        For site k and discrete value a,
+
+            p_k(a) = (n_k(a) + pseudocount)
+                     / (N + pseudocount * d_k)
+
+        and the site amplitude is sqrt(p_k(a)). All bonds therefore start at
+        dimension one and the initial Born distribution is exactly the product
+        of the one-site empirical marginals.
+
+        A small non-negative pseudocount gives unseen states non-zero support
+        when physical_dims includes values absent from the training sample.
+        Set it to zero for the unsmoothed empirical distribution.
+        """
+        if configurations.dim() != 2:
+            raise MPSShapeError(
+                "configurations must have shape (num_samples, num_sites), "
+                f"got {tuple(configurations.shape)}"
+            )
+        if configurations.shape[0] < 1:
+            raise MPSShapeError("at least one configuration is required")
+        if configurations.shape[1] < 2:
+            raise MPSShapeError("at least two sites are required")
+        if pseudocount < 0:
+            raise ValueError(f"pseudocount must be >= 0, got {pseudocount}")
+
+        data = configurations.long()
+        _, num_sites = data.shape
+
+        if physical_dims is None:
+            if (data < 0).any():
+                raise MPSShapeError("configuration values must be non-negative")
+            inferred = data.max(dim=0).values + 1
+            dims = [int(value.item()) for value in inferred]
+        else:
+            dims = list(physical_dims)
+
+        model = cls(
+            num_sites=num_sites,
+            physical_dims=dims,
+            dtype=dtype,
+            _skip_init=True,
+        ).to(device=data.device)
+        model._validate_configurations(data)
+
+        for site, physical_dim in enumerate(model.physical_dims):
+            counts = torch.bincount(
+                data[:, site],
+                minlength=physical_dim,
+            ).to(dtype=torch.float64)
+            probabilities = counts + float(pseudocount)
+            probabilities = probabilities / probabilities.sum()
+            amplitudes = probabilities.sqrt().to(dtype=dtype)
+            model.site_tensors[site].data = amplitudes.reshape(1, physical_dim, 1)
+
+        return model
+
+    def _normalise_physical_dims(self, physical_dim: Union[int, Sequence[int]] = 2) -> List[int]:
+        """Turn the ``physical_dims`` argument into a per-site list.
+
+        Accepts a single int (broadcast to every site) or an explicit sequence
+        of length ``num_sites``. Every dimension must be at least 1.
+        """
+        if isinstance(physical_dim, int):
+            if physical_dim < 1:
+                raise MPSShapeError(f"physical_dim must be >= 1, got {physical_dim}")
+            physical_dims: List[int] = [physical_dim] * self.num_sites
+        else:
+            physical_dims = list(physical_dim)
+            if len(physical_dims) != self.num_sites:
+                raise MPSShapeError(
+                    f"physical_dim sequence has length {len(physical_dims)}, "
+                    f"expected {self.num_sites}"
+                )
+            for k, d in enumerate(physical_dims):
+                if not isinstance(d, int):
+                    raise TypeError(
+                        f"physical_dim[{k}]={d!r} must be int, got {type(d).__name__}"
+                    )
+                if d < 1:
+                    raise MPSShapeError(
+                        f"physical_dim[{k}]={d} must be >= 1"
+                    )
+        return physical_dims
+    
+    # ------------------------------------------------------------------
+    #  Input validation helpers
+    # ------------------------------------------------------------------
+
+    def _validate_configurations(self, configurations: torch.Tensor) -> None:
+        """Check shape and value range of a configurations tensor."""
+        if configurations.dim() != 2:
+            raise MPSShapeError(
+                "configurations must be 2D with shape (batch_size, num_sites), "
+                f"got shape {tuple(configurations.shape)}"
+            )
+        if configurations.shape[1] != self.num_sites:
+            raise MPSShapeError(
+                f"Expected {self.num_sites} sites, got {configurations.shape[1]}"
+            )
+        if configurations.numel() == 0:
+            return
+       
+        if self.is_homogeneous:
+            physical_dim = self.physical_dims[0]
+            min_value = configurations.min().item()
+            max_value = configurations.max().item()
+            if min_value < 0 or max_value >= physical_dim:
+                raise MPSShapeError(
+                    f"configurations values must be in [0, {physical_dim}), "
+                    f"got range [{min_value}, {max_value}]"
+                )
+            return
+        col_min = configurations.min(dim=0).values
+        col_max = configurations.max(dim=0).values
+        dims = torch.tensor(
+            self.physical_dims, device=configurations.device, dtype=col_max.dtype
+        )
+        out_of_range = (col_min < 0) | (col_max >= dims)
+        if out_of_range.any():
+            bad_sites = out_of_range.nonzero(as_tuple=False).flatten().tolist()
+            details = "; ".join(
+                f"site {k}: range [{col_min[k].item()}, {col_max[k].item()}] "
+                f"outside [0, {self.physical_dims[k]})"
+                for k in bad_sites
+            )
+            raise MPSShapeError(f"configurations out of range -- {details}")
+
+    def _validate_truncation(
+        self, max_bond_dim: Optional[int], epsilon_trunc: float
+    ) -> None:
+        """Validate SVD truncation hyperparameters."""
+        if max_bond_dim is not None and max_bond_dim < 1:
+            raise MPSShapeError(
+                f"max_bond_dim must be >= 1 or None, got {max_bond_dim}"
+            )
+        if not (0.0 <= epsilon_trunc < 1.0):
+            raise ValueError(
+                f"epsilon_trunc must satisfy 0 <= epsilon_trunc < 1, "
+                f"got {epsilon_trunc}"
+            )
+
+    # ------------------------------------------------------------------
+    #  Internal helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _as_matrices(A: torch.Tensor) -> torch.Tensor:
+        """View a site tensor ``(D_l, d, D_r)`` as ``d`` matrices ``(d, D_l, D_r)``.
+
+        Most contractions are cleaner when the physical index is on the outside:
+        slicing ``[v]`` then gives the transfer matrix for physical value ``v``.
+        This is just a ``permute`` (a view), not a copy.
+        """
+        return A.permute(1, 0, 2)
+    
+    def select_matrices(
+        self, site: int, values: torch.Tensor
+    ) -> torch.Tensor:
+        """Return the per-sample transfer matrices of ``site`` for ``values``.
+
+        For each entry ``v`` in ``values``, picks the slice ``A[:, v, :]`` of
+        this site's tensor (shape ``D_{site-1} x D_site``) and stacks them
+        along a leading batch axis.
+        """
+        if not 0 <= site < self.num_sites:
+            raise IndexError(
+                f"site {site} out of range [0, {self.num_sites})"
+            )
+        if values.dim() != 1:
+            raise ValueError(
+                f"values must be 1-D, got shape {tuple(values.shape)}"
+            )
+        if values.dtype != torch.long:
+            values = values.long()
+        return self._as_matrices(self.site_tensors[site][:, values, :])
+    
+    # ------------------------------------------------------------------
+    #  Device / dtype movement
+    # ------------------------------------------------------------------
+        
+    def to(self, *args, **kwargs):
+        """
+        Move and/or cast the MPS, respecting the configured dtype.
+        """
+        new_dtype: Optional[torch.dtype] = kwargs.pop("dtype", None)
+        new_device = kwargs.pop("device", None)
+        positional: List = []
+        for argument in args:
+            if isinstance(argument, torch.dtype):
+                if new_dtype is None:
+                    new_dtype = argument
+            elif isinstance(argument, (torch.device, str)):
+                if new_device is None:
+                    new_device = argument
+            else:
+                positional.append(argument)
+ 
+        if new_dtype is not None:
+            self_is_complex = self.dtype in (torch.complex64, torch.complex128)
+            new_is_complex = new_dtype in (torch.complex64, torch.complex128)
+            if self_is_complex != new_is_complex:
+                raise TypeError(
+                    f"Cannot change between real and complex dtype via .to() "
+                    f"({self.dtype!r} -> {new_dtype!r}). "
+                    "Construct a new MPS instead."
+                )
+            self.dtype = new_dtype
+ 
+        rebuilt_kwargs = dict(kwargs)
+        if new_dtype is not None:
+            rebuilt_kwargs["dtype"] = new_dtype
+        if new_device is not None:
+            rebuilt_kwargs["device"] = new_device
+
+        return super().to(*positional, **rebuilt_kwargs)
+    
+    # ------------------------------------------------------------------
+    #  Persistence
+    # ------------------------------------------------------------------
+    
+    def save(self, path: str) -> None:
+        """
+        Serialise the full MPS (config + site tensors) to disk.
+        """
+        torch.save(
+            {
+                "config": {
+                    "num_sites": self.num_sites,
+                    "physical_dims": list(self.physical_dims),
+                    "dtype": _REVERSE_DTYPE_MAP[self.dtype],
+                },
+                "tensors": [site_tensor.detach().cpu().clone() for site_tensor in self.site_tensors],
+            },
+            path,
+        )
+ 
+    @classmethod
+    def load(cls, path: str, map_location: Optional[str] = None) -> "MPS":
+        """
+        Reconstruct an MPS previously saved with :meth:`save`.
+        """
+        checkpoint = torch.load(path, map_location=map_location, weights_only=True)
+        config = checkpoint["config"]
+        tensors: List[torch.Tensor] = checkpoint["tensors"]
+
+        raw_dtype = config["dtype"]
+        if isinstance(raw_dtype, str):
+            dtype = _DTYPE_MAP[raw_dtype]
+        else:
+            dtype = raw_dtype
+ 
+        if len(tensors) != config["num_sites"]:
+            raise MPSShapeError(
+                f"Checkpoint has {len(tensors)} tensors but config "
+                f"declares num_sites={config['num_sites']}"
+            )
+ 
+        model = cls(
+            num_sites=config["num_sites"],
+            physical_dims=config["physical_dims"],
+            dtype=dtype,
+            _skip_init=True,
+        )
+
+        for dst, src in zip(model.site_tensors, tensors):
+            src_on_device = src.to(device=dst.device, dtype=dtype)
+            dst.data = src_on_device.clone()
+        return model
+ 
+    
+    # ----------------------------------------------------------------------
+    # Properties
+    # ----------------------------------------------------------------------
+    
+    @property
+    def bond_dims(self) -> List[int]:
+        """Internal bond dimensions, length ``num_sites - 1``."""
+        return [self.site_tensors[k].shape[2] for k in range(self.num_sites - 1)]
+    
+    @property
+    def full_bond_dims(self) -> List[int]:
+        """All bond dimensions including boundaries D_0=D_N=1  (length N+1)."""
+        return [1] + self.bond_dims + [1]
+
+    @property
+    def num_parameters(self) -> int:
+        """Total real parameter count (complex tensors counted as 2 reals)."""
+        num_real_parameters = sum(site_tensor.numel() for site_tensor in self.site_tensors)
+        if self.dtype in (torch.complex64, torch.complex128):
+            num_real_parameters *= 2
+        return num_real_parameters
+    
+    @property
+    def _numerical_floor(self) -> float:
+        """Smallest denominator allowed before clamping, dtype-dependent."""
+        if self.dtype in (torch.float32, torch.complex64):
+            return 1e-15
+        return 1e-30
+    
+    @property
+    def _log_floor(self) -> float:
+        """Smallest |psi|^2 used to clamp before log(), dtype-dependent.
+        """
+        if self.dtype in (torch.float32, torch.complex64):
+            return 1e-30
+        return 1e-300
+    
+    @property
+    def is_homogeneous(self) -> bool:
+        """True iff every site has the same physical dimension."""
+        d0 = self.physical_dims[0]
+        return all(d == d0 for d in self.physical_dims)
+    
+    # ----------------------------------------------------------------------
+    # Amplitudes, norms, probabilities
+    # ----------------------------------------------------------------------
+    
+    def log_amplitude_squared(self, configurations: torch.Tensor) -> torch.Tensor:
+        """
+        Numerically stable log |Psi(v)|^2 with per-site rescaling.
+        """
+        if configurations.dtype != torch.long:
+            configurations = configurations.long()
+        self._validate_configurations(configurations)
+        batch_size = configurations.shape[0]
+ 
+        device = configurations.device
+ 
+        tensor = self.site_tensors[0]
+        values = configurations[:, 0]
+        env = self._as_matrices(tensor[:, values, :]).squeeze(1)
+ 
+        log_scale = torch.zeros(batch_size, dtype=torch.float64, device=device)
+ 
+        env_abs_max = env.abs().amax(dim=1).clamp_min(self._numerical_floor)
+        env = env / env_abs_max.unsqueeze(1).to(env.dtype)
+        log_scale = log_scale + env_abs_max.double().log()
+ 
+        for site in range(1, self.num_sites):
+            tensor = self.site_tensors[site]
+            values = configurations[:, site]
+            selected_matrices = self._as_matrices(tensor[:, values, :])
+            env = torch.bmm(env.unsqueeze(1), selected_matrices).squeeze(1)
+ 
+            env_abs_max = env.abs().amax(dim=1).clamp_min(self._numerical_floor)
+            env = env / env_abs_max.unsqueeze(1).to(env.dtype)
+            log_scale = log_scale + env_abs_max.double().log()
+ 
+        psi_rescaled = env.squeeze(1)
+        if psi_rescaled.is_complex():
+            abs2 = (psi_rescaled.real.square() + psi_rescaled.imag.square()).clamp_min(self._log_floor)
+        else:
+            abs2 = psi_rescaled.square().clamp_min(self._log_floor)
+ 
+        log_abs2 = abs2.double().log() + 2.0 * log_scale
+ 
+        real_dtype = (
+            torch.float32 if self.dtype in (torch.float32, torch.complex64)
+            else torch.float64
+        )
+        return log_abs2.to(real_dtype)
+    
+    def log_norm(self) -> torch.Tensor:
+        """ 
+        Computes log Z = log <psi|psi>.
+        """
+
+        env = torch.ones(1, 1, dtype=self.dtype, device=self.site_tensors[0].device)
+        log_scale = torch.zeros((), dtype=torch.float64, device=env.device)
+
+        for site in range(self.num_sites):
+            tensor = self.site_tensors[site]
+            matrices = self._as_matrices(tensor)
+
+            contracted = torch.matmul(env, matrices)
+            matrices_dagger = matrices.conj().transpose(1, 2)
+            env = torch.matmul(matrices_dagger, contracted).sum(dim=0)
+
+            scale = env.abs().max().clamp_min(self._numerical_floor)
+            env   = env / scale
+            log_scale = log_scale + scale.double().log()
+        
+        z_value = env.squeeze()
+        real_dtype = (
+            torch.float32 if self.dtype in (torch.float32, torch.complex64)
+            else torch.float64
+        )
+        return (z_value.real.clamp_min(self._numerical_floor).double().log() + log_scale).to(real_dtype)
+
+    def log_prob(self, configurations: torch.Tensor, batch_size: Optional[int] = None) -> torch.Tensor:
+        """
+        Computes log P(v) = log |Psi(v)|^2 - log Z
+        """
+        if batch_size is not None and batch_size < 1:
+            raise ValueError(f"batch_size must be >= 1 or None, got {batch_size}")
+ 
+        log_z = self.log_norm()
+        if batch_size is None or len(configurations) <= batch_size:
+            return self.log_amplitude_squared(configurations) - log_z
+ 
+        chunks: List[torch.Tensor] = []
+        for start in range(0, len(configurations), batch_size):
+            end = start + batch_size
+            chunks.append(self.log_amplitude_squared(configurations[start:end]))
+        return torch.cat(chunks) - log_z
+
+    def nll(self, configurations: torch.Tensor, reduction: str = "mean", batch_size: Optional[int] = None,) -> torch.Tensor:
+        """
+        Negative log-likelihood:
+            NLL(v) = -log P(v)
+
+        reduction:
+          - "none": returns shape (batch_size,)
+          - "mean": scalar
+          - "sum" : scalar
+        """
+        nll_values = -self.log_prob(configurations, batch_size=batch_size)
+
+        if reduction == "none":
+            return nll_values
+        if reduction == "mean":
+            return nll_values.mean()
+        if reduction == "sum":
+            return nll_values.sum()
+
+        raise ValueError(f"Unsupported reduction: {reduction!r}. Use 'mean', 'sum', or 'none'.")
+    
+    @torch.no_grad()
+    def anomaly_score(self, configurations, batch_size: Optional[int] = None):
+        """
+        Per-sample anomaly score, defined as the negative log-likelihood:
+ 
+            score(v) = -log P(v)
+ 
+        Higher scores correspond to less probable configurations under the
+        learned model.  Used as the raw signal for thresholding in
+        anomaly-detection pipelines.
+        """
+        return -self.log_prob(configurations, batch_size=batch_size)
+    
+    @torch.no_grad()
+    def normalize_state(self) -> None:
+        """Rescale every site so that ``<Psi|Psi> = 1``.
+
+        The total norm is spread evenly across sites (each tensor is multiplied
+        by ``exp(-log_z / (2N))``) rather than dumped on one of them, which keeps
+        the individual tensors well-scaled. Called after each DMRG loop to stop
+        the amplitude drifting.
+        """
+        log_z = self.log_norm()
+        scale = torch.exp(-0.5 * log_z / self.num_sites)
+        for site_parameter in self.site_tensors:
+            site_parameter.data = site_parameter.data * scale
+
+    # ----------------------------------------------------------------------
+    # Canonicalization and tensor manipulation
+    # ----------------------------------------------------------------------
+
+    def _truncation_rank(
+        self,
+        singular_values: torch.Tensor,
+        max_bond_dim: Optional[int],
+        epsilon_trunc: float,
+    ) -> int:
+        """Smallest rank whose discarded SVD weight is at most epsilon_trunc.
+
+        The discarded weight after keeping rank r is
+        sum_{i>r} sigma_i^2 / sum_i sigma_i^2.
+
+        max_bond_dim is a hard computational cap. If that cap is more
+        restrictive than the tolerance, the resulting discarded weight may be
+        larger than epsilon_trunc and is reported by the trainer.
+        """
+        if len(singular_values) == 0:
+            raise MPSNumericalError("SVD returned no singular values")
+
+        if epsilon_trunc == 0.0:
+            rank_from_tolerance = len(singular_values)
+        else:
+            weights = singular_values.abs().square()
+            total_weight = weights.sum().clamp_min(self._numerical_floor)
+            retained_fraction = torch.cumsum(weights, dim=0) / total_weight
+            target = torch.tensor(
+                1.0 - epsilon_trunc,
+                dtype=retained_fraction.dtype,
+                device=retained_fraction.device,
+            )
+            rank_from_tolerance = (
+                int(torch.searchsorted(retained_fraction, target).item()) + 1
+            )
+
+        rank_to_keep = max(rank_from_tolerance, 1)
+        if max_bond_dim is not None:
+            rank_to_keep = min(rank_to_keep, max_bond_dim)
+        return rank_to_keep
+
+    def _log_discarded_weight(
+        self, singular_values: torch.Tensor, num_kept: int, where: str
+    ) -> None:
+        """Emit a warning if the discarded weight at a truncation exceeds the
+        configured threshold.
+
+        Short-circuits when the logger is disabled at WARNING level so that
+        the (cheap but non-zero) ``square().sum()`` and the host sync are
+        avoided in production runs where the warning is filtered out.
+        """
+        if not logger.isEnabledFor(logging.WARNING):
+            return
+        if num_kept >= len(singular_values):
+            return
+        kept = singular_values[:num_kept].square().sum()
+        total = singular_values.square().sum().clamp_min(1e-30)
+        discarded = (1.0 - kept / total).item()
+        if discarded > self._discarded_weight_warn_threshold:
+            logger.warning(
+                "%s: discarded %.1f%% weight (rank %d -> %d)",
+                where, 100.0 * discarded, len(singular_values), num_kept,
+            )
+    
+    @torch.no_grad()
+    def left_canonicalize(
+        self,
+        up_to: Optional[int] = None,
+        truncate: bool = False,
+        max_bond_dim: Optional[int] = None,
+        epsilon_trunc: float = 0.0,
+    ) -> Optional[List[torch.Tensor]]:
+        """Sweep left-to-right putting sites into left-canonical form.
+
+        Walks sites ``0 .. up_to-1``, factorising each one and pushing the
+        remainder onto its right neighbour, so every processed tensor becomes an
+        isometry (``A^dag A = I``). ``up_to`` defaults to the last bond, leaving
+        the chain fully left-canonical with the norm collected on the final site.
+
+        With ``truncate=False`` it uses QR (exact, no rank loss) and returns
+        ``None``. With ``truncate=True`` it uses SVD, honours ``max_bond_dim`` /
+        ``epsilon_trunc``, and returns the kept singular values per bond — which is
+        exactly what :meth:`MPSExplainer.bond_entropies` consumes.
+        """
+        if up_to is None:
+            up_to = self.num_sites - 1
+        if not (0 <= up_to <= self.num_sites - 1):
+            raise MPSShapeError(
+                f"up_to={up_to} out of range [0, {self.num_sites - 1}]"
+            )
+        if truncate:
+            self._validate_truncation(max_bond_dim, epsilon_trunc)
+
+        if not truncate:
+            for site in range(up_to):
+                tensor = self.site_tensors[site].data
+                bond_dim_left, physical_dim, bond_dim_right = tensor.shape
+ 
+                Q, R = torch.linalg.qr(tensor.reshape(bond_dim_left * physical_dim, bond_dim_right))
+                new_bond_dim = Q.shape[-1]
+                self.site_tensors[site].data = Q.reshape(bond_dim_left, physical_dim, new_bond_dim)
+ 
+                next_tensor = self.site_tensors[site + 1].data
+                _, physical_dim_next, bond_dim_right_next = next_tensor.shape
+ 
+                self.site_tensors[site + 1].data = (
+                    R @ next_tensor.reshape(bond_dim_right, physical_dim_next * bond_dim_right_next)
+                ).reshape(new_bond_dim, physical_dim_next, bond_dim_right_next)
+            return None
+ 
+        singular_values_per_bond: List[torch.Tensor] = []
+        for site in range(up_to):
+            tensor = self.site_tensors[site].data
+            bond_dim_left, physical_dim, bond_dim_right = tensor.shape
+ 
+            U, singular_values, Vh = torch.linalg.svd(tensor.reshape(bond_dim_left * physical_dim, bond_dim_right), full_matrices=False)
+            rank_kept = self._truncation_rank(singular_values, max_bond_dim, epsilon_trunc)
+            self._log_discarded_weight(
+                singular_values, rank_kept, where=f"left_canonicalize@bond_{site}"
+            )
+            U, singular_values, Vh = U[:, :rank_kept], singular_values[:rank_kept], Vh[:rank_kept, :]
+ 
+            singular_values_per_bond.append(singular_values.detach().clone())
+            self.site_tensors[site].data = U.reshape(bond_dim_left, physical_dim, rank_kept)
+ 
+            SV = singular_values.unsqueeze(1) * Vh
+            next_tensor = self.site_tensors[site + 1].data
+            _, physical_dim_next, bond_dim_right_next = next_tensor.shape
+ 
+            self.site_tensors[site + 1].data = (
+                SV @ next_tensor.reshape(bond_dim_right, physical_dim_next * bond_dim_right_next)
+            ).reshape(rank_kept, physical_dim_next, bond_dim_right_next)
+ 
+        return singular_values_per_bond
+
+    @torch.no_grad()
+    def right_canonicalize(
+        self,
+        from_site: Optional[int] = None,
+        truncate: bool = False,
+        max_bond_dim: Optional[int] = None,
+        epsilon_trunc: float = 0.0,
+    ) -> Optional[List[torch.Tensor]]:
+        """Sweep right-to-left putting sites into right-canonical form.
+
+        Mirror image of :meth:`left_canonicalize`: processes sites from the end
+        down to ``from_site``, leaving each as a right isometry and carrying the
+        remainder leftward. ``from_site`` defaults to 1, so the whole chain
+        (except site 0, which ends up holding the norm) becomes right-canonical.
+
+        QR when ``truncate=False`` (returns ``None``), SVD with truncation
+        otherwise (returns the kept singular values per bond, ordered from the
+        left). DMRG uses this to prime the chain before the first sweep.
+        """
+        if from_site is None:
+            from_site = 1
+        if not (1 <= from_site <= self.num_sites):
+            raise MPSShapeError(
+                f"from_site={from_site} out of range [1, {self.num_sites}]"
+            )
+        if truncate:
+            self._validate_truncation(max_bond_dim, epsilon_trunc)
+ 
+        if not truncate:
+            for site in range(self.num_sites - 1, from_site - 1, -1):
+                tensor = self.site_tensors[site].data
+                bond_dim_left, physical_dim, bond_dim_right = tensor.shape
+ 
+                Q, R = torch.linalg.qr(tensor.reshape(bond_dim_left, physical_dim * bond_dim_right).conj().T)
+                new_bond_dim = Q.shape[1]
+                self.site_tensors[site].data = Q.conj().T.reshape(new_bond_dim, physical_dim, bond_dim_right)
+ 
+                previous_tensor = self.site_tensors[site - 1].data
+                R_dagger = R.conj().T
+                bond_dim_left_previous, physical_dim_previous, _ = previous_tensor.shape
+ 
+                self.site_tensors[site - 1].data = (
+                    previous_tensor.reshape(bond_dim_left_previous * physical_dim_previous, bond_dim_left) @ R_dagger
+                ).reshape(bond_dim_left_previous, physical_dim_previous, new_bond_dim)
+            return None
+ 
+        singular_values_per_bond: List[torch.Tensor] = []
+        for site in range(self.num_sites - 1, from_site - 1, -1):
+            tensor = self.site_tensors[site].data
+            bond_dim_left, physical_dim, bond_dim_right = tensor.shape
+ 
+            U, singular_values, Vh = torch.linalg.svd(tensor.reshape(bond_dim_left, physical_dim * bond_dim_right), full_matrices=False)
+            rank_kept = self._truncation_rank(singular_values, max_bond_dim, epsilon_trunc)
+            self._log_discarded_weight(
+                singular_values, rank_kept, where=f"right_canonicalize@bond_{site}"
+            )
+            U, singular_values, Vh = U[:, :rank_kept], singular_values[:rank_kept], Vh[:rank_kept, :]
+ 
+            singular_values_per_bond.append(singular_values.detach().clone())
+            self.site_tensors[site].data = Vh.reshape(rank_kept, physical_dim, bond_dim_right)
+ 
+            US = U * singular_values.unsqueeze(0)
+            previous_tensor = self.site_tensors[site - 1].data
+            bond_dim_left_previous, physical_dim_previous, _ = previous_tensor.shape
+            self.site_tensors[site - 1].data = (
+                previous_tensor.reshape(bond_dim_left_previous * physical_dim_previous, bond_dim_left) @ US
+            ).reshape(bond_dim_left_previous, physical_dim_previous, rank_kept)
+ 
+        singular_values_per_bond.reverse()
+        return singular_values_per_bond
+    
+    @torch.no_grad()
+    def merge_sites(self, k: int) -> torch.Tensor:
+        """Contract sites ``k`` and ``k+1`` into one rank-4 block.
+
+        Returns ``theta`` of shape ``(D_{k-1}, d_k, d_{k+1}, D_{k+1})``. This is
+        the two-site object DMRG updates in one shot; afterwards
+        :meth:`split_and_truncate` factorises it back into two sites.
+        """
+        if not (0 <= k < self.num_sites - 1):
+            raise MPSShapeError(f"Invalid bond index k={k}; expected 0 <= k < {self.num_sites - 1}")
+
+        site_tensor_first  = self.site_tensors[k].data
+        site_tensor_second = self.site_tensors[k + 1].data
+
+        bond_dim_left, physical_dim_first, bond_dim_middle = site_tensor_first.shape
+        _, physical_dim_second, bond_dim_right   = site_tensor_second.shape
+
+        return (site_tensor_first.reshape(bond_dim_left * physical_dim_first, bond_dim_middle) @ site_tensor_second.reshape(bond_dim_middle, physical_dim_second * bond_dim_right)).reshape(bond_dim_left, physical_dim_first, physical_dim_second, bond_dim_right)
+    
+    @torch.no_grad()
+    def split_and_truncate(
+        self,
+        k: int,
+        merged_tensor: torch.Tensor,
+        direction: str,
+        max_bond_dim: int,
+        epsilon_trunc: float = 0.0,
+    ) -> torch.Tensor:
+        """Split a merged two-site block back into two sites via SVD.
+
+        Inverse of :meth:`merge_sites`. SVD across the ``(D_l*d_k | d_{k+1}*D_r)``
+        cut, truncate to ``max_bond_dim`` / ``epsilon_trunc``, and absorb the singular
+        values into one side depending on ``direction``: ``"right"`` leaves site
+        ``k`` as a left-isometry and pushes the weight onto ``k+1`` (used on a
+        left-to-right sweep), ``"left"`` does the opposite. The new bond
+        dimension is whatever survived truncation, so the chain grows or shrinks
+        adaptively. Returns the kept singular values.
+        """
+        if not (0 <= k < self.num_sites - 1):
+            raise MPSShapeError(
+                f"Invalid bond index k={k}; expected 0 <= k < {self.num_sites - 1}"
+            )
+        if direction not in ("right", "left"):
+            raise ValueError(
+                f"direction must be 'right' or 'left', got {direction!r}"
+            )
+        if merged_tensor.dim() != 4:
+            raise MPSShapeError(
+                f"theta must be rank-4 with shape (D_l, d, d, D_r), got shape {tuple(merged_tensor.shape)}"
+            )
+        bond_dim_left, physical_dim_first, physical_dim_second, bond_dim_right = merged_tensor.shape
+        expected_physical_dim_first = self.physical_dims[k]
+        expected_physical_dim_second = self.physical_dims[k + 1]
+        if physical_dim_first != expected_physical_dim_first or physical_dim_second != expected_physical_dim_second:
+            raise MPSShapeError(
+                f"theta physical dims must be ({expected_physical_dim_first}, {expected_physical_dim_second}), got ({physical_dim_first}, {physical_dim_second})"
+            )
+        expected_bond_dim_left = self.site_tensors[k].shape[0]
+        expected_bond_dim_right = self.site_tensors[k + 1].shape[2]
+        if bond_dim_left != expected_bond_dim_left or bond_dim_right != expected_bond_dim_right:
+            raise MPSShapeError(
+                f"theta bond dims ({bond_dim_left}, {bond_dim_right}) do not match adjacent sites "
+                f"({expected_bond_dim_left}, {expected_bond_dim_right})"
+            )
+        self._validate_truncation(max_bond_dim, epsilon_trunc)
+
+        U, singular_values, Vh = torch.linalg.svd(merged_tensor.reshape(bond_dim_left * physical_dim_first, physical_dim_second * bond_dim_right), full_matrices=False)
+        rank_kept = self._truncation_rank(singular_values, max_bond_dim, epsilon_trunc)
+        self._log_discarded_weight(singular_values, rank_kept, where=f"split_and_truncate@bond_{k}")
+        U, singular_values, Vh = U[:, :rank_kept], singular_values[:rank_kept], Vh[:rank_kept, :]
+
+        if direction == "right":
+            self.site_tensors[k].data = U.reshape(bond_dim_left, physical_dim_first, rank_kept)
+            self.site_tensors[k + 1].data = (singular_values.unsqueeze(1) * Vh).reshape(rank_kept, physical_dim_second, bond_dim_right)
+        else:
+            self.site_tensors[k].data = (U * singular_values.unsqueeze(0)).reshape(bond_dim_left, physical_dim_first, rank_kept)
+            self.site_tensors[k + 1].data = Vh.reshape(rank_kept, physical_dim_second, bond_dim_right)
+
+        return singular_values.detach().clone()

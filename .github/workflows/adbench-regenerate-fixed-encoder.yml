@@ -1,0 +1,143 @@
+name: adbench-regenerate-fixed-encoder
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "encoder.py"
+      - "data_artifacts.py"
+      - "prepare_adbench.py"
+      - "train_adbench_final.py"
+      - "evaluate_adbench_final.py"
+      - "compare_adbench_regeneration.py"
+      - ".github/workflows/adbench-regenerate-fixed-encoder.yml"
+
+jobs:
+  regenerate-and-train:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        dataset:
+          - annthyroid
+          - cardio
+          - cover
+          - mammography
+          - shuttle
+          - vowels
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --index-url https://download.pytorch.org/whl/cpu torch
+          python -m pip install "numpy>=1.26" "pandas>=2.0" "scikit-learn>=1.4"
+
+      - name: Regenerate all ADBench encoded bundles with fixed encoder
+        run: |
+          python prepare_adbench.py artifacts/adbench \
+            --cache-dir .cache/adbench \
+            --seed 123 \
+            --bins 8 \
+            --train-fraction 0.70 \
+            --val-fraction 0.15
+
+      - name: Validate regenerated encoder did not collapse non-constant continuous features
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          for p in sorted(Path("artifacts/adbench").glob("*/encoder.json")):
+              payload=json.loads(p.read_text())
+              bad=[]
+              for spec in payload["specs"]:
+                  if spec["kind"]=="continuous":
+                      lo=spec.get("min_value")
+                      hi=spec.get("max_value")
+                      if lo is not None and hi is not None and lo != hi and int(spec["regular_states"]) < 2:
+                          bad.append(spec["name"])
+              if bad:
+                  raise SystemExit(f"{p.parent.name}: non-constant continuous features collapsed: {bad}")
+              print(p.parent.name, "OK")
+          PY
+
+      - name: Train regenerated MPS
+        run: |
+          python train_adbench_final.py \
+            artifacts/adbench \
+            "${{ matrix.dataset }}" \
+            "outputs/${{ matrix.dataset }}" \
+            --max-bond-dim 16 \
+            --epsilon-trunc 0.0 \
+            --lr 0.002 \
+            --batch-size 1024 \
+            --max-loops 30 \
+            --lr-patience 5 \
+            --lr-shrink 0.5 \
+            --lr-min 1e-5 \
+            --early-stopping-patience 10 \
+            --seed 123
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: adbench-fixed-${{ matrix.dataset }}
+          path: |
+            artifacts/adbench/${{ matrix.dataset }}
+            outputs/${{ matrix.dataset }}
+          if-no-files-found: error
+          retention-days: 90
+
+  evaluate:
+    needs: regenerate-and-train
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --index-url https://download.pytorch.org/whl/cpu torch
+          python -m pip install "numpy>=1.26" "pandas>=2.0" "scikit-learn>=1.4"
+
+      - name: Download regenerated artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: adbench-fixed-*
+          path: downloaded
+          merge-multiple: false
+
+      - name: Assemble regenerated suite
+        run: |
+          mkdir -p artifacts/adbench outputs
+          for d in annthyroid cardio cover mammography shuttle vowels; do
+            cp -r "downloaded/adbench-fixed-$d/artifacts/adbench/$d" "artifacts/adbench/$d"
+            cp -r "downloaded/adbench-fixed-$d/outputs/$d" "outputs/$d"
+          done
+
+      - name: Evaluate regenerated ADBench suite
+        run: |
+          python evaluate_adbench_final.py artifacts/adbench outputs evaluation
+
+      - name: Compare against invalid pre-fix results
+        run: |
+          python compare_adbench_regeneration.py \
+            evaluation/evaluation.json \
+            evaluation
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: adbench-fixed-evaluation
+          path: evaluation
+          if-no-files-found: error
+          retention-days: 90\non:\n  workflow_dispatch:\n

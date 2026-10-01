@@ -1,0 +1,32 @@
+{
+  "format_version": 1,
+  "workflow_run_id": 36734660642,
+  "code_commit": "7d99bb870dbe5657186acc71249b085edc5adad1",
+  "frozen_config": "paper_mps_config.json",
+  "artifacts": {
+    "annthyroid": {
+      "id": 11106796529,
+      "digest": "sha256:5312e9224e49c4adc7e032946d9dfd928c07bc237e192a052c0f7bfe40315090"
+    },
+    "cardio": {
+      "id": 11106092485,
+      "digest": "sha256:d5eca866f962e416586f89204f3b60e2de01bf0367eb49fe07a65af25f9d3f4f"
+    },
+    "cover": {
+      "id": 11106699142,
+      "digest": "sha256:f9697d1b5f65c6393d3d72bad79c64075ac9d8adc44c78fc2dddc8edb10ddfc1"
+    },
+    "mammography": {
+      "id": 11106517114,
+      "digest": "sha256:087f26474fdea5dcafad0d93679310000ab3a444d7ab1214092ff80ccb2f4fdc"
+    },
+    "shuttle": {
+      "id": 11106686731,
+      "digest": "sha256:9acb015d2f96f51cd81e7d1124beb7b4fea1f3765d458639ab34ebbbed0cc1a9"
+    },
+    "vowels": {
+      "id": 11106112869,
+      "digest": "sha256:5983f9989389819c7cbc454ced2738895c07fac98840bb7e983bdb32fe2f6cf0"
+    }
+  }
+}

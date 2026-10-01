@@ -1,0 +1,71 @@
+name: build-final-interaction-figures
+
+on:
+  workflow_dispatch:
+
+jobs:
+  figures:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install plotting dependencies
+        run: python -m pip install -r requirements-plot.txt
+
+      - name: Download frozen interaction artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          RUN_ID=$(python -c 'import json; print(json.load(open("final_interactions_manifest.json"))["workflow_run_id"])')
+          mkdir -p outputs/interactions
+          for dataset in annthyroid cardio cover mammography shuttle vowels; do
+            mkdir -p "outputs/interactions/$dataset"
+            gh run download "$RUN_ID" \
+              --repo "${{ github.repository }}" \
+              --name "final-interactions-$dataset" \
+              --dir "outputs/interactions/$dataset"
+          done
+
+      - name: Build publication figures
+        run: |
+          python plot_interaction_results.py \
+            outputs/interactions \
+            outputs/figures
+
+      - name: Validate figure outputs
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          expected = [
+              "fidelity_vs_order.png",
+              "fidelity_vs_order.pdf",
+              "fidelity_vs_order_log.png",
+              "fidelity_vs_order_log.pdf",
+              "sparsity_vs_interactions.png",
+              "sparsity_vs_interactions.pdf",
+              "sparsity_vs_interactions_log.png",
+              "sparsity_vs_interactions_log.pdf",
+          ]
+          root = Path("outputs/figures")
+          for name in expected:
+              path = root / name
+              assert path.exists(), path
+              assert path.stat().st_size > 1000, (path, path.stat().st_size)
+              print(name, path.stat().st_size)
+          PY
+
+      - name: Upload publication figures
+        uses: actions/upload-artifact@v4
+        with:
+          name: final-interaction-figures
+          path: outputs/figures
+          if-no-files-found: error
+          retention-days: 90

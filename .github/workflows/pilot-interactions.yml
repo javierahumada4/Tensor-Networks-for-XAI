@@ -1,0 +1,72 @@
+name: pilot-raw-interaction-experiments
+
+on:
+  workflow_dispatch:
+
+jobs:
+  pilot:
+    strategy:
+      fail-fast: false
+      max-parallel: 6
+      matrix:
+        dataset:
+          - annthyroid
+          - cardio
+          - cover
+          - mammography
+          - shuttle
+          - vowels
+
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      actions: read
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install CPU dependencies
+        run: |
+          python -m pip install --index-url https://download.pytorch.org/whl/cpu torch
+          python -m pip install "numpy>=1.26" "pandas>=2.0"
+
+      - name: Prepare encoded data
+        run: |
+          python prepare_adbench.py artifacts/adbench \
+            --cache-dir .cache/adbench \
+            --seed 123 \
+            --bins 8
+
+      - name: Download frozen model
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          RUN_ID=$(python -c 'import json; print(json.load(open("final_training_manifest.json"))["workflow_run_id"])')
+          mkdir -p "outputs/final/${{ matrix.dataset }}"
+          gh run download "$RUN_ID" \
+            --repo "${{ github.repository }}" \
+            --name "final-mps-${{ matrix.dataset }}" \
+            --dir "outputs/final/${{ matrix.dataset }}"
+
+      - name: Run pilot interaction experiments
+        run: |
+          python run_interaction_experiments.py \
+            artifacts/adbench \
+            "${{ matrix.dataset }}" \
+            "outputs/final/${{ matrix.dataset }}" \
+            "outputs/xai_pilot/${{ matrix.dataset }}" \
+            --max-samples 25 \
+            --max-subsets-per-sample 5000 \
+            --seed 123
+
+      - name: Upload pilot results
+        uses: actions/upload-artifact@v4
+        with:
+          name: xai-pilot-${{ matrix.dataset }}
+          path: outputs/xai_pilot/${{ matrix.dataset }}
+          if-no-files-found: error
+          retention-days: 30

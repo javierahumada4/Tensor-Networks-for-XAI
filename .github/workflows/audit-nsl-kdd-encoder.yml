@@ -1,0 +1,30 @@
+name: audit-nsl-kdd-encoder
+
+on:
+  workflow_dispatch:
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: |
+          python -m pip install --index-url https://download.pytorch.org/whl/cpu torch
+          python -m pip install "numpy>=1.26" "pandas>=2.0" "scikit-learn>=1.4"
+      - name: Download pinned NSL-KDD
+        run: |
+          mkdir -p nsl_kdd
+          curl -fL "$NSL_KDD_BASE/KDDTrain%2B.txt" -o nsl_kdd/KDDTrain+.txt
+          curl -fL "$NSL_KDD_BASE/KDDTest%2B.txt" -o nsl_kdd/KDDTest+.txt
+      - name: Audit encoder-only detection
+        run: python audit_nsl_kdd_encoder.py nsl_kdd outputs/nsl_encoder_audit.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nsl-kdd-encoder-audit
+          path: outputs/nsl_encoder_audit.json
+          retention-days: 90

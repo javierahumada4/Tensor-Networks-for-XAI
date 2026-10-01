@@ -208,6 +208,22 @@ class TabularEncoder:
                 for value in np.unique(inner)
             ]
 
+            # A highly concentrated non-constant variable can have every
+            # interior quantile equal to one endpoint (for example, 98% zeros
+            # plus a small positive tail). It must never collapse to one
+            # encoded state: choose a deterministic two-bin fallback that
+            # separates the dominant endpoint from the nearest distinct value.
+            if not inner_edges:
+                unique = np.unique(observed)
+                median = float(np.median(observed))
+                if median <= min_value:
+                    threshold = (float(unique[0]) + float(unique[1])) / 2.0
+                elif median >= max_value:
+                    threshold = (float(unique[-2]) + float(unique[-1])) / 2.0
+                else:
+                    threshold = median
+                inner_edges = [threshold]
+
         regular_states = len(inner_edges) + 1
         low_code = regular_states
         high_code = regular_states + 1

@@ -1,6 +1,10 @@
 name: nsl-kdd-regression
 
 on:
+  pull_request:
+    paths:
+      - "regress_nsl_kdd.py"
+      - ".github/workflows/nsl-kdd-regression.yml"
   workflow_dispatch:
 
 jobs:

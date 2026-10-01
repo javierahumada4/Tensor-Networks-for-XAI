@@ -173,4 +173,4 @@ jobs:
           name: nsl-kdd-interaction-experiments
           path: results/nsl_kdd_interactions
           if-no-files-found: error
-          retention-days: 90
+          retention-days: 90\non:\n  workflow_dispatch:\n

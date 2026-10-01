@@ -140,4 +140,4 @@ jobs:
           name: adbench-fixed-evaluation
           path: evaluation
           if-no-files-found: error
-          retention-days: 90
+          retention-days: 90\non:\n  workflow_dispatch:\n

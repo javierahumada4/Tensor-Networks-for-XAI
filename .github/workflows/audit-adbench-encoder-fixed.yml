@@ -38,4 +38,4 @@ jobs:
             outputs/adbench_encoder_audit
             artifacts/adbench
           if-no-files-found: error
-          retention-days: 90
+          retention-days: 90\non:\n  workflow_dispatch:\n

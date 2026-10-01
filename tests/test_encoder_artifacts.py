@@ -102,6 +102,23 @@ def test_constant_continuous_feature_is_preserved() -> None:
     ]
 
 
+
+def test_skewed_nonconstant_continuous_feature_never_collapses() -> None:
+    values = [0.0] * 96 + [1.0, 2.0, 3.0, 4.0]
+    frame = pd.DataFrame({"x": values})
+    encoder = TabularEncoder(
+        n_bins=8,
+        continuous_columns=["x"],
+    ).fit(frame)
+    spec = encoder.specs[0]
+
+    assert spec.kind == "continuous"
+    assert spec.regular_states >= 2
+
+    encoded = encoder.transform(frame).squeeze(1)
+    assert torch.unique(encoded).numel() >= 2
+
+
 def test_high_cardinality_categorical_requires_explicit_decision() -> None:
     frame = pd.DataFrame({"id_like": [f"id-{i}" for i in range(10)]})
 

@@ -25,6 +25,7 @@ def test_continuous_special_states_and_categorical_unknown_missing() -> None:
     encoder = TabularEncoder(
         n_bins=4,
         categorical_columns=["kind"],
+        continuous_columns=["value"],
     ).fit(train)
 
     transformed = encoder.transform(
@@ -46,6 +47,38 @@ def test_continuous_special_states_and_categorical_unknown_missing() -> None:
 
     assert transformed[1, 1].item() == kind_spec.unknown_code
     assert transformed[2, 1].item() == kind_spec.missing_code
+
+
+
+def test_binary_numeric_feature_preserves_both_states() -> None:
+    frame = pd.DataFrame({"binary": [0, 1, 0, 1, 0, 1]})
+    encoder = TabularEncoder().fit(frame)
+    spec = encoder.specs[0]
+
+    assert spec.kind == "discrete_numeric"
+    assert spec.regular_states == 2
+    assert torch.unique(encoder.transform(frame)).numel() == 2
+
+    transformed = encoder.transform(
+        pd.DataFrame({"binary": [0, 1, 2, np.nan]})
+    ).squeeze(1)
+    assert transformed[0].item() != transformed[1].item()
+    assert transformed[2].item() == spec.unknown_code
+    assert transformed[3].item() == spec.missing_code
+
+
+def test_low_cardinality_integer_numeric_is_discrete_unless_forced_continuous() -> None:
+    frame = pd.DataFrame({"x": [0, 1, 2, 0, 1, 2]})
+
+    inferred = TabularEncoder(max_discrete_numeric_states=8).fit(frame)
+    assert inferred.specs[0].kind == "discrete_numeric"
+    assert inferred.specs[0].regular_states == 3
+
+    forced = TabularEncoder(
+        n_bins=2,
+        continuous_columns=["x"],
+    ).fit(frame)
+    assert forced.specs[0].kind == "continuous"
 
 
 def test_constant_continuous_feature_is_preserved() -> None:

@@ -73,6 +73,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--drop", default=None)
     parser.add_argument("--bins", type=int, default=8)
     parser.add_argument("--max-categories", type=int, default=64)
+    parser.add_argument("--max-discrete-numeric-states", type=int, default=8)
     parser.add_argument("--train-fraction", type=float, default=0.70)
     parser.add_argument("--val-fraction", type=float, default=0.15)
     parser.add_argument("--seed", type=int, default=123)
@@ -99,6 +100,7 @@ def main() -> None:
         continuous_columns=_parse_list(args.continuous),
         drop_columns=_parse_list(args.drop),
         max_categories=args.max_categories,
+        max_discrete_numeric_states=args.max_discrete_numeric_states,
     )
 
     counts = bundle.manifest["counts"]

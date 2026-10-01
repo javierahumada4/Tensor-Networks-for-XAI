@@ -1,0 +1,131 @@
+name: nsl-kdd-interaction-experiments
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "run_nsl_kdd_interaction_experiments.py"
+      - "aggregate_nsl_kdd_interactions.py"
+      - "plot_nsl_kdd_interactions.py"
+      - "mps_interactions.py"
+      - ".github/workflows/nsl-kdd-interaction-experiments.yml"
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  NSL_KDD_COMMIT: "0804644cbc0a8af940ac8d9da4a90889f61b4d57"
+  NSL_KDD_BASE: "https://raw.githubusercontent.com/mwinton/NSL-KDD-Data-Set/0804644cbc0a8af940ac8d9da4a90889f61b4d57"
+  MODEL_RUN_ID: "36754543152"
+  MODEL_ARTIFACT: "nsl-kdd-refactored-paper"
+
+jobs:
+  interactions:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --index-url https://download.pytorch.org/whl/cpu torch
+          python -m pip install "numpy>=1.26" "pandas>=2.0"
+
+      - name: Download validated D16 NSL-KDD model
+        env:
+          GH_TOKEN: "${{ github.token }}"
+        run: |
+          mkdir -p validated_model
+          gh run download "$MODEL_RUN_ID" \
+            --name "$MODEL_ARTIFACT" \
+            --dir validated_model
+          find validated_model -maxdepth 3 -type f -print
+          MODEL_PATH="$(find validated_model -name model.pt -print -quit)"
+          test -n "$MODEL_PATH"
+          cp "$MODEL_PATH" validated_model/model.pt
+
+      - name: Recreate exact legacy NSL-KDD encoding
+        run: |
+          mkdir -p nsl_kdd
+          curl -fL "$NSL_KDD_BASE/KDDTrain%2B.txt" -o nsl_kdd/KDDTrain+.txt
+          curl -fL "$NSL_KDD_BASE/KDDTest%2B.txt" -o nsl_kdd/KDDTest+.txt
+          git fetch origin main:refs/remotes/origin/main
+          git show origin/main:encoder_nsl_kdd.py > /tmp/encoder_nsl_kdd.py
+          python /tmp/encoder_nsl_kdd.py nsl_kdd
+
+      - name: Run interaction shard
+        run: |
+          python run_nsl_kdd_interaction_experiments.py \
+            nsl_kdd \
+            validated_model/model.pt \
+            "shard-${{ matrix.shard }}" \
+            --max-samples 100 \
+            --max-order 3 \
+            --seed 123 \
+            --shard-index "${{ matrix.shard }}" \
+            --num-shards 10
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nsl-kdd-interactions-shard-${{ matrix.shard }}
+          path: shard-${{ matrix.shard }}
+          if-no-files-found: error
+          retention-days: 90
+
+  aggregate:
+    needs: interactions
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install analysis dependencies
+        run: |
+          python -m pip install "numpy>=1.26" "pandas>=2.0" "matplotlib>=3.8"
+
+      - name: Download shard outputs
+        uses: actions/download-artifact@v4
+        with:
+          pattern: nsl-kdd-interactions-shard-*
+          path: shards
+          merge-multiple: false
+
+      - name: Aggregate experiments
+        run: |
+          python aggregate_nsl_kdd_interactions.py shards results/nsl_kdd_interactions
+
+      - name: Build figures
+        run: |
+          python plot_nsl_kdd_interactions.py \
+            results/nsl_kdd_interactions \
+            results/nsl_kdd_interactions/figures
+
+      - name: Show final report
+        run: |
+          cat results/nsl_kdd_interactions/report.json
+          echo
+          cat results/nsl_kdd_interactions/fidelity_summary.csv
+          echo
+          cat results/nsl_kdd_interactions/sparsity_summary.csv
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nsl-kdd-interaction-experiments
+          path: results/nsl_kdd_interactions
+          if-no-files-found: error
+          retention-days: 90

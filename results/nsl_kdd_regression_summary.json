@@ -80,5 +80,35 @@
     "preserve small-cardinality integer-like numeric variables as exact discrete states",
     "never allow a nonconstant continuous feature to collapse to one regular state",
     "normalize numeric discrete values consistently between fit and transform"
-  ]
+  ],
+  "fixed_generic_encoder_audit": {
+    "workflow_run_id": 36821700064,
+    "artifact_id": 11144121489,
+    "artifact_digest": "sha256:05030b513153a9e88bdd4a8ec6684ab04a7ad6dbcaa8cd2ad718d65fb1f9e1d1",
+    "policy": {
+      "n_bins": 8,
+      "max_discrete_numeric_states": 8,
+      "continuous_fallback": "nonconstant continuous variables with degenerate quantiles are deterministically split into at least two regular states"
+    },
+    "independent_baseline": {
+      "auc_roc": 0.9576706424488732,
+      "auc_pr": 0.9597674723008377
+    },
+    "nonconstant_features_collapsed_to_one_state": 0,
+    "physical_dimension_sum": 264,
+    "max_physical_dimension": 28,
+    "conclusion": "Fixing degenerate quantile binning recovers nearly all of the legacy encoder's threshold-free anomaly ranking without NSL-KDD-specific feature rules."
+  },
+  "root_cause": {
+    "bug": "When every interior empirical quantile coincided with a feature endpoint, the generic encoder removed those cut points and encoded a nonconstant feature with one regular state.",
+    "observed_on_nsl_kdd": {
+      "affected_features": 25,
+      "old_independent_auc_roc": 0.9045146091963456,
+      "fixed_independent_auc_roc": 0.9576706424488732,
+      "auc_roc_gain": 0.05315603325252759,
+      "old_independent_auc_pr": 0.9079768425771508,
+      "fixed_independent_auc_pr": 0.9597674723008377,
+      "auc_pr_gain": 0.0517906297236869
+    }
+  }
 }

@@ -1,13 +1,7 @@
 name: audit-nsl-kdd-encoder
 
 on:
-  pull_request:
-    paths:
-      - "audit_nsl_kdd_encoder.py"
-      - ".github/workflows/audit-nsl-kdd-encoder.yml"
-
-env:
-  NSL_KDD_BASE: "https://raw.githubusercontent.com/mwinton/NSL-KDD-Data-Set/0804644cbc0a8af940ac8d9da4a90889f61b4d57"
+  workflow_dispatch:
 
 jobs:
   audit:
